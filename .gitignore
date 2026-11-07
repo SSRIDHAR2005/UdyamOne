@@ -1,0 +1,60 @@
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================
+# Node.js / React / Vite
+# ==============================
+node_modules/
+dist/
+
+# ==============================
+# Environment variables and secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+# ==============================
+# Databases
+# ==============================
+*.db
+*.sqlite
+*.sqlite3
+
+# ==============================
+# Sensitive KYC documents and OCR data
+# ==============================
+**/kyc_documents/
+**/kyc_ocr_dump*.json
+kyc_ocr_dump*.json
+
+# ==============================
+# Dataset archives and extracted metadata
+# ==============================
+*.zip
+**/__MACOSX/
+
+# ==============================
+# Temporary and generated files
+# ==============================
+*.log
+~$*
+.DS_Store
+Thumbs.db
+
+# ==============================
+# IDE settings
+# ==============================
+.vscode/
+.idea/
+# Original hackathon input documents
+/6ae1873397bc1_digital/6ad9d4887d445_airtel_sync/
