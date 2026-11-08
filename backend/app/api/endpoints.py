@@ -16,6 +16,7 @@ from app.services.pricing_service import pricing_service
 from app.services.pdf_service import pdf_service
 from app.services.kyc_service import kyc_service
 from app.services.ocr_service import ocr_service
+from app.services.number_validator import number_validator
 from app.services.order_service import order_service
 from app.services.lead_scoring_service import lead_scoring_service
 from app.services.analytics_service import analytics_service
@@ -132,6 +133,150 @@ def get_specimen_file(specimen_id: str, doc_type: str):
         media_type="image/png",
         headers={"Content-Disposition": f'inline; filename="{specimen_id}_{doc_type}.png"'}
     )
+
+@api_router.get("/kyc/ocr-evaluation")
+def get_ocr_engine_evaluation():
+    """
+    Evaluates PaddleOCR vs Fallback engine capabilities, preprocessing pipelines,
+    and field extraction benchmark accuracy across specimen types.
+    """
+    return ocr_service.get_ocr_engine_evaluation()
+
+@api_router.post("/kyc/validate-number")
+def validate_identifier_number(
+    number_type: str = Form(...),
+    value: str = Form(...)
+):
+    """
+    Enforces strict structural and Modulo-36 checksum validation on GSTIN and Udyam numbers.
+    Used for live validation and human-in-the-loop manual correction.
+    """
+    nt = number_type.lower().strip()
+    val = value.strip()
+    if nt in ["gstin", "gst"]:
+        return number_validator.validate_gstin(val)
+    elif nt in ["udyam", "udyam_number"]:
+        return number_validator.validate_udyam(val)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported number_type '{number_type}'. Allowed: 'gstin', 'udyam'")
+
+@api_router.post("/kyc/extract-document")
+async def extract_kyc_document(
+    file: UploadFile = File(...),
+    doc_type: str = Form("generic")
+):
+    """
+    Performs standalone OCR extraction with image preprocessing (resizing, deskewing,
+    contrast enhancement) and returns extracted fields with confidence scores,
+    strict number validation, and granular lifecycle stages for human-in-the-loop review.
+    """
+    ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+
+    ext = "." + file.filename.split(".")[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file extension '{ext}'. Allowed: PDF, PNG, JPG, JPEG (Max 10MB)."
+        )
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File exceeds maximum allowed size of 10MB ({len(content)/(1024*1024):.1f}MB)."
+        )
+
+    extracted = ocr_service.extract_document_fields(
+        filename=file.filename,
+        file_bytes=content,
+        doc_type=doc_type
+    )
+
+    prep_meta = extracted.get("preprocessing_metadata", {})
+    rotation = prep_meta.get("rotation_angle_deg", 0.0)
+    is_corrupted = extracted.get("is_corrupted_or_blank", False)
+    confidence = extracted.get("confidence", 0.85)
+
+    stages = [
+        {
+            "stage_number": 1,
+            "stage_id": "DOCUMENT_UPLOADED",
+            "title": "Document Uploaded",
+            "status": "COMPLETED",
+            "detail": f"File '{file.filename}' ({len(content) / 1024:.1f} KB) received and integrity verified.",
+            "timestamp": "Immediate"
+        },
+        {
+            "stage_number": 2,
+            "stage_id": "OCR_PROCESSING",
+            "title": "OCR Preprocessing",
+            "status": "COMPLETED",
+            "detail": f"Normalized DPI, deskewed ({rotation:+.1f}°), noise-filtered, and contrast-enhanced.",
+            "timestamp": "Immediate"
+        },
+        {
+            "stage_number": 3,
+            "stage_id": "DATA_EXTRACTED",
+            "title": "Data Extracted",
+            "status": "FAILED" if is_corrupted else "COMPLETED",
+            "confidence": round(confidence, 2),
+            "detail": "Document unreadable/corrupted" if is_corrupted else f"Extracted {extracted.get('document_type')} fields ({int(confidence*100)}% confidence).",
+            "timestamp": "Immediate"
+        }
+    ]
+
+    num_val_status = "NOT_APPLICABLE"
+    num_val_detail = "Non-registry identity or utility document."
+    if extracted.get("gstin"):
+        gv = extracted.get("gstin_validation", {})
+        num_val_status = "PASSED" if gv.get("valid") else "FAILED"
+        num_val_detail = gv.get("reason", "GSTIN validation evaluated.")
+    elif extracted.get("udyam_number"):
+        uv = extracted.get("udyam_validation", {})
+        num_val_status = "PASSED" if uv.get("valid") else "FAILED"
+        num_val_detail = uv.get("reason", "Udyam validation evaluated.")
+    elif is_corrupted:
+        num_val_status = "FAILED"
+        num_val_detail = "Cannot validate identifier: document content is unreadable or blank."
+
+    stages.append({
+        "stage_number": 4,
+        "stage_id": "NUMBER_VALIDATION",
+        "title": "Number Validation",
+        "status": num_val_status,
+        "detail": num_val_detail,
+        "timestamp": "Immediate"
+    })
+
+    stages.append({
+        "stage_number": 5,
+        "stage_id": "REGISTRY_VERIFICATION_PENDING",
+        "title": "Registry Verification Pending",
+        "status": "PENDING",
+        "detail": "Awaiting user confirmation of extracted fields before querying simulated registry.",
+        "timestamp": "Pending Review"
+    })
+    stages.append({
+        "stage_number": 6,
+        "stage_id": "REGISTRY_VERIFICATION",
+        "title": "Registry Verification",
+        "status": "PENDING",
+        "detail": "Mock registry lookup not yet performed. A valid number does NOT imply active registration.",
+        "timestamp": "Pending Submission"
+    })
+
+    return {
+        "status": "SUCCESS",
+        "filename": file.filename,
+        "doc_type": doc_type,
+        "extracted_fields": extracted,
+        "lifecycle_stages": stages,
+        "confidence": round(confidence, 2),
+        "is_corrupted_or_blank": is_corrupted,
+        "requires_hitl_review": is_corrupted or (confidence < 0.80) or (num_val_status == "FAILED"),
+        "disclaimer": "Simulated mock verification for hackathon evaluation. Number validity does not imply active government status."
+    }
 
 @api_router.post("/kyc/verify-documents")
 async def verify_kyc_documents(

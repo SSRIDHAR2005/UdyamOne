@@ -17,11 +17,11 @@
 ---
 
 ### [0:20 – 0:55] MODULE 1: AI BUSINESS ADVISOR IN ACTION
-*(Visual: Switch to MSME Portal > AI Advisor tab. Select Hindi or English, choose 'Polyclinic' scenario)*
+*(Visual: Switch to MSME Portal > AI Advisor tab. Demonstrate pause-tolerant Multilingual Voice Assistant or select 'Polyclinic' scenario)*
 
 > **Speaker:**  
 > "Watch how Dr. Meera, a clinic owner in Bengaluru, discovers connectivity in under 30 seconds.  
-> Our AI Advisor asks intuitive, progressive questions about her staff size, dental patient records, and budget. It supports English, Hindi, and Tamil with voice narration.  
+> Our AI Advisor features a pause-tolerant multilingual voice assistant supporting English, Hindi, and Tamil that captures natural pauses without cutting off the speaker.  
 > Grounded strictly in Accel's 25-SKU catalogue, it outputs three mathematically verified bundles: Essential, Growth, and Advanced.  
 > Notice the **Growth bundle** combines 300 Mbps fiber, business SIMs, Google cloud email, patient data backup, and endpoint cybersecurity—saving her ₹1,200 a month compared to unbundled services."
 
@@ -37,13 +37,13 @@
 
 ---
 
-### [1:20 – 2:00] MODULE 3: SMART DIGITAL KYC & EXCEPTION HANDLING
-*(Visual: Click 'Proceed to Digital KYC'. Show DPDP consent checkboxes, then load specimen K02 or K11)*
+### [1:20 – 2:00] MODULE 3: SMART DIGITAL KYC & GENUINE DOCUMENT VERIFICATION
+*(Visual: Click 'Proceed to Digital KYC'. Show DPDP consent checkboxes, demonstrate genuine document upload cards with drag-and-drop or 1-click 'Auto-Attach Specimen Files' for K02 or K11)*
 
 > **Speaker:**  
 > "Next, digital onboarding. Under the DPDP Act 2023, Dr. Meera reviews purpose-specific consent notices for tax and telecom verification.  
-> In one click, our engine verifies her GSTIN and Udyam number against over 6,000 mock registry records.  
-> Watch our native OCR engine in action: on valid documents like specimen K02, verification passes instantly.  
+> In Step 3, our genuine document-upload pipeline accepts real PDFs, PNGs, and JPEGs with drag-and-drop. All four cards initially display 'Not Uploaded' in neutral grey, and verification is locked until required files are present.  
+> Watch our native OCR and hash-verification engine in action: on clean uploads like specimen K02, all 4 documents verify instantly with authorized IDs securely masked.  
 > But if an applicant uploads an expired utility bill—like specimen K11 with a bill from 2025—our rule engine immediately flags that it exceeds the 90-day threshold from our reference date, providing clear, corrective instructions rather than a cold rejection."
 
 ---

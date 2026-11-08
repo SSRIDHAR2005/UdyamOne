@@ -76,6 +76,43 @@ export async function verifyKycDocuments(formData: FormData) {
   return res.json();
 }
 
+export async function extractKycDocument(formData: FormData) {
+  const res = await fetch(`${API_BASE}/kyc/extract-document`, {
+    method: 'POST',
+    body: formData
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to extract document via OCR');
+  }
+  return res.json();
+}
+
+export async function validateIdentifierNumber(numberType: 'gstin' | 'udyam', value: string) {
+  const form = new URLSearchParams();
+  form.append('number_type', numberType);
+  form.append('value', value);
+  const res = await fetch(`${API_BASE}/kyc/validate-number`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: form.toString()
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to validate identifier');
+  }
+  return res.json();
+}
+
+export async function fetchOcrEngineEvaluation() {
+  const res = await fetch(`${API_BASE}/kyc/ocr-evaluation`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to fetch OCR evaluation');
+  }
+  return res.json();
+}
+
 export async function fetchSpecimenDoc(specimenId: string, docType: string): Promise<Blob> {
   const res = await fetch(`${API_BASE}/kyc/specimen-file/${encodeURIComponent(specimenId)}/${encodeURIComponent(docType)}`);
   if (!res.ok) {

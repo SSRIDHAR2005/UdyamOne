@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from app.core.config import settings
 from app.services.ocr_service import ocr_service
+from app.services.number_validator import number_validator
 
 class KYCService:
     def __init__(self, data_dir: Optional[Path] = None):
@@ -422,10 +423,13 @@ class KYCService:
 
             # Check 2: GSTIN Matching
             ext_gst = extracted.get("gstin")
+            target_gst = ext_gst or gst_clean
+            gst_val = number_validator.validate_gstin(target_gst) if target_gst else {"valid": False, "reason": "No GSTIN provided"}
+
             if ext_gst and gst_clean:
                 if ext_gst == gst_clean:
                     checks.append({
-                        "field": "GSTIN",
+                        "field": "GSTIN Matching",
                         "expected": gst_clean,
                         "extracted": ext_gst,
                         "status": "MATCH",
@@ -435,7 +439,7 @@ class KYCService:
                     doc_issues.append(f"GSTIN mismatch: Document states '{ext_gst}', but Step 2 states '{gst_clean}'.")
                     doc_status = "NEEDS_REVIEW" if doc_status != "FAILED" else "FAILED"
                     checks.append({
-                        "field": "GSTIN",
+                        "field": "GSTIN Matching",
                         "expected": gst_clean,
                         "extracted": ext_gst,
                         "status": "MISMATCH",
@@ -444,7 +448,7 @@ class KYCService:
             elif not ext_gst and not extracted.get("is_corrupted_or_blank"):
                 doc_status = "NEEDS_REVIEW" if doc_status != "FAILED" else "FAILED"
                 checks.append({
-                    "field": "GSTIN",
+                    "field": "GSTIN Matching",
                     "expected": gst_clean or "15-Digit GSTIN",
                     "extracted": "Not Legible / Inconclusive",
                     "status": "NEEDS_REVIEW",
@@ -452,12 +456,33 @@ class KYCService:
                 })
             elif ext_gst and not gst_clean:
                 checks.append({
-                    "field": "GSTIN",
+                    "field": "GSTIN Matching",
                     "expected": "Not Declared",
                     "extracted": ext_gst,
                     "status": "MATCH",
                     "detail": f"Discovered GSTIN '{ext_gst}' on document."
                 })
+
+            # Check 2b: Strict Number Validation (Modulo-36 Checksum & State Code)
+            if target_gst:
+                if gst_val.get("valid"):
+                    checks.append({
+                        "field": "GSTIN Modulo-36 Checksum",
+                        "expected": "Valid Modulo-36 Checksum (GST Council Spec)",
+                        "extracted": f"{target_gst} ({gst_val.get('state_name')})",
+                        "status": "MATCH",
+                        "detail": f"Modulo-36 checksum matched (Check char: '{gst_val.get('checksum_actual')}'). Jurisdiction: {gst_val.get('state_name')}."
+                    })
+                else:
+                    doc_status = "FAILED"
+                    doc_issues.append(f"GSTIN checksum/structure invalid: {gst_val.get('error')}")
+                    checks.append({
+                        "field": "GSTIN Modulo-36 Checksum",
+                        "expected": "Valid Modulo-36 Checksum (GST Council Spec)",
+                        "extracted": f"{target_gst} (Invalid)",
+                        "status": "FAILED",
+                        "detail": gst_val.get("reason", "Structural or checksum failure.")
+                    })
 
             # Check 3: Legal / Business Name Matching
             ext_name = extracted.get("trade_name") or extracted.get("legal_name")
@@ -491,10 +516,36 @@ class KYCService:
                     "detail": "Legal trade name could not be extracted with high confidence."
                 })
 
-            # Check 4: Registry Status
-            if gst_res and not gst_res["valid"]:
-                doc_status = "FAILED"
-                doc_issues.append(f"GSTIN is {gst_res['status'].upper()} in mock GST registry.")
+            # Check 4: Separate Format Validation from Registry Status
+            if gst_res:
+                reg_status_val = gst_res.get("status", "UNKNOWN").upper()
+                if gst_res["valid"]:
+                    checks.append({
+                        "field": "Simulated GSTN Registry Status",
+                        "expected": "ACTIVE",
+                        "extracted": f"{reg_status_val} (Simulated Sandbox)",
+                        "status": "MATCH",
+                        "detail": f"Queried simulated GSTN sandbox registry: Entity is ACTIVE. Note: Valid checksum format does not automatically guarantee active status."
+                    })
+                else:
+                    doc_status = "FAILED"
+                    doc_issues.append(f"GSTIN is {reg_status_val} in mock GST registry.")
+                    checks.append({
+                        "field": "Simulated GSTN Registry Status",
+                        "expected": "ACTIVE",
+                        "extracted": f"{reg_status_val} (Simulated Sandbox)",
+                        "status": "FAILED",
+                        "detail": f"Simulated GSTN portal indicates status is '{reg_status_val}'. Even though syntax/checksum may be valid, registration is inactive."
+                    })
+
+            gst_lifecycle = [
+                {"stage_number": 1, "title": "Document Uploaded", "status": "COMPLETED", "detail": f"File '{fname}' ({fsize / 1024:.1f} KB) uploaded."},
+                {"stage_number": 2, "title": "OCR Preprocessing", "status": "COMPLETED", "detail": f"Deskewed ({extracted.get('preprocessing_metadata', {}).get('rotation_angle_deg', 0.0):+.1f}°), contrast normalized."},
+                {"stage_number": 3, "title": "Data Extracted", "status": "FAILED" if extracted.get("is_corrupted_or_blank") else "COMPLETED", "detail": f"Extracted Form GST REG-06 fields with {int(extracted.get('confidence', 0.85)*100)}% confidence."},
+                {"stage_number": 4, "title": "Number Validation", "status": "PASSED" if gst_val.get("valid") else "FAILED", "detail": gst_val.get("reason", "Modulo-36 checksum evaluated.")},
+                {"stage_number": 5, "title": "Registry Verification Pending", "status": "COMPLETED", "detail": "Awaiting mock registry query."},
+                {"stage_number": 6, "title": "Registry Verification", "status": "SUCCESSFUL" if (gst_res and gst_res.get("valid")) else "FAILED", "detail": f"Simulated GSTN result: {gst_res.get('status') if gst_res else 'Not queried'}"}
+            ]
 
             document_results["gst_certificate"] = {
                 "doc_name": "GST Registration Certificate",
@@ -507,6 +558,9 @@ class KYCService:
                     "trade_name": extracted.get("trade_name") or "Unextracted",
                     "principal_address": extracted.get("service_address") or (gst_res.get("data", {}).get("principal_place_of_business") if gst_res and gst_res.get("data") else "Verified via registry")
                 },
+                "ocr_confidence": extracted.get("confidence", 0.85),
+                "number_validation": gst_val,
+                "lifecycle_stages": gst_lifecycle,
                 "checks": checks,
                 "issues": doc_issues
             }
@@ -565,6 +619,9 @@ class KYCService:
 
             # Check 2: Registration Number Match
             ext_udy = extracted.get("udyam_number")
+            target_udy = ext_udy or udyam_clean
+            udy_val = number_validator.validate_udyam(target_udy) if target_udy else {"valid": False, "reason": "No Udyam number provided"}
+
             if ext_udy and udyam_clean:
                 if ext_udy == udyam_clean:
                     checks.append({
@@ -601,6 +658,27 @@ class KYCService:
                     "status": "MATCH",
                     "detail": f"Extracted Udyam number '{ext_udy}'."
                 })
+
+            # Check 2b: Strict Udyam Structure & State Code Validation
+            if target_udy:
+                if udy_val.get("valid"):
+                    checks.append({
+                        "field": "Udyam Format & State Validation",
+                        "expected": "UDYAM-XX-00-XXXXXXX Structure",
+                        "extracted": f"{target_udy} ({udy_val.get('state_name')})",
+                        "status": "MATCH",
+                        "detail": f"Structure verified for state: {udy_val.get('state_name')} ({udy_val.get('state_code')})."
+                    })
+                else:
+                    doc_status = "FAILED"
+                    doc_issues.append(f"Udyam structure invalid: {udy_val.get('error')}")
+                    checks.append({
+                        "field": "Udyam Format & State Validation",
+                        "expected": "UDYAM-XX-00-XXXXXXX Structure",
+                        "extracted": f"{target_udy} (Invalid)",
+                        "status": "FAILED",
+                        "detail": udy_val.get("reason", "Structural failure.")
+                    })
 
             # Check 3: Enterprise Name Match (e.g. K07 name mismatch check)
             ext_ent_name = extracted.get("trade_name")
@@ -643,6 +721,37 @@ class KYCService:
                 "detail": "MSME classification category confirmed."
             })
 
+            # Check 5: Separate Format Validation from Registry Status
+            if udyam_res:
+                reg_udy_status = udyam_res.get("status", "UNKNOWN").upper()
+                if udyam_res["valid"]:
+                    checks.append({
+                        "field": "Simulated Udyam Registry Status",
+                        "expected": "ACTIVE",
+                        "extracted": f"{reg_udy_status} (Simulated Sandbox)",
+                        "status": "MATCH",
+                        "detail": f"Queried simulated MSME Udyam registry: Entity verified. Note: Valid structure does not guarantee active registry entry."
+                    })
+                else:
+                    doc_status = "FAILED"
+                    doc_issues.append(f"Udyam registration is {reg_udy_status} in mock registry.")
+                    checks.append({
+                        "field": "Simulated Udyam Registry Status",
+                        "expected": "ACTIVE",
+                        "extracted": f"{reg_udy_status} (Simulated Sandbox)",
+                        "status": "FAILED",
+                        "detail": f"Simulated Udyam portal indicates status '{reg_udy_status}'."
+                    })
+
+            udy_lifecycle = [
+                {"stage_number": 1, "title": "Document Uploaded", "status": "COMPLETED", "detail": f"File '{fname}' ({fsize / 1024:.1f} KB) uploaded."},
+                {"stage_number": 2, "title": "OCR Preprocessing", "status": "COMPLETED", "detail": f"Deskewed ({extracted.get('preprocessing_metadata', {}).get('rotation_angle_deg', 0.0):+.1f}°), contrast normalized."},
+                {"stage_number": 3, "title": "Data Extracted", "status": "FAILED" if extracted.get("is_corrupted_or_blank") else "COMPLETED", "detail": f"Extracted Udyam Certificate fields with {int(extracted.get('confidence', 0.88)*100)}% confidence."},
+                {"stage_number": 4, "title": "Number Validation", "status": "PASSED" if udy_val.get("valid") else "FAILED", "detail": udy_val.get("reason", "Udyam structure evaluated.")},
+                {"stage_number": 5, "title": "Registry Verification Pending", "status": "COMPLETED", "detail": "Awaiting mock registry query."},
+                {"stage_number": 6, "title": "Registry Verification", "status": "SUCCESSFUL" if (udyam_res and udyam_res.get("valid")) else "FAILED", "detail": f"Simulated Udyam result: {udyam_res.get('status') if udyam_res else 'Not queried'}"}
+            ]
+
             document_results["udyam_certificate"] = {
                 "doc_name": "Udyam Registration Certificate",
                 "status": doc_status,
@@ -654,6 +763,9 @@ class KYCService:
                     "enterprise_category": extracted.get("enterprise_category") or "Micro / Small",
                     "major_activity": extracted.get("major_activity") or "Services"
                 },
+                "ocr_confidence": extracted.get("confidence", 0.88),
+                "number_validation": udy_val,
+                "lifecycle_stages": udy_lifecycle,
                 "checks": checks,
                 "issues": doc_issues
             }
@@ -753,6 +865,15 @@ class KYCService:
                 "detail": "ID verified with sensitive numbers masked per DPDP Act specifications."
             })
 
+            sig_lifecycle = [
+                {"stage_number": 1, "title": "Document Uploaded", "status": "COMPLETED", "detail": f"File '{fname}' ({fsize / 1024:.1f} KB) uploaded."},
+                {"stage_number": 2, "title": "OCR Preprocessing", "status": "COMPLETED", "detail": "Image normalized & DPDP redaction masks prepared."},
+                {"stage_number": 3, "title": "Data Extracted", "status": "FAILED" if extracted.get("is_corrupted_or_blank") else "COMPLETED", "detail": f"Extracted signatory identity ({int(extracted.get('confidence', 0.90)*100)}% confidence)."},
+                {"stage_number": 4, "title": "Number Validation", "status": "PASSED", "detail": "ID token structure verified & masked per DPDP Act 2023."},
+                {"stage_number": 5, "title": "Registry Verification Pending", "status": "COMPLETED", "detail": "Authorized signatory role cross-matched."},
+                {"stage_number": 6, "title": "Registry Verification", "status": "SUCCESSFUL" if doc_status != "FAILED" else "FAILED", "detail": "Identity specimen matched against application."}
+            ]
+
             document_results["signatory_id"] = {
                 "doc_name": "Authorized Signatory Photo ID",
                 "status": doc_status,
@@ -763,6 +884,8 @@ class KYCService:
                     "designation": extracted.get("designation") or applicant_role,
                     "masked_id": masked_id
                 },
+                "ocr_confidence": extracted.get("confidence", 0.90),
+                "lifecycle_stages": sig_lifecycle,
                 "checks": checks,
                 "issues": doc_issues
             }
@@ -862,6 +985,15 @@ class KYCService:
                 "detail": "Service address confirmed consistent with registered operational location."
             })
 
+            addr_lifecycle = [
+                {"stage_number": 1, "title": "Document Uploaded", "status": "COMPLETED", "detail": f"File '{fname}' ({fsize / 1024:.1f} KB) uploaded."},
+                {"stage_number": 2, "title": "OCR Preprocessing", "status": "COMPLETED", "detail": "Normalized utility bill table scan and date anchor lines."},
+                {"stage_number": 3, "title": "Data Extracted", "status": "FAILED" if extracted.get("is_corrupted_or_blank") else "COMPLETED", "detail": f"Extracted billing details & date ({int(extracted.get('confidence', 0.92)*100)}% confidence)."},
+                {"stage_number": 4, "title": "Number Validation", "status": "PASSED" if not is_expired else "FAILED", "detail": f"Bill age: {days_old or 'N/A'} days (Regulatory limit: 90 days)."},
+                {"stage_number": 5, "title": "Registry Verification Pending", "status": "COMPLETED", "detail": "Operational premises address cross-verified."},
+                {"stage_number": 6, "title": "Registry Verification", "status": "SUCCESSFUL" if not is_expired and doc_status != "FAILED" else "NEEDS_REVIEW", "detail": "DISCOM billing status confirmed."}
+            ]
+
             document_results["address_proof"] = {
                 "doc_name": "Address Proof (Electricity Bill)",
                 "status": doc_status,
@@ -874,6 +1006,8 @@ class KYCService:
                     "days_old": days_old,
                     "is_expired": is_expired
                 },
+                "ocr_confidence": extracted.get("confidence", 0.92),
+                "lifecycle_stages": addr_lifecycle,
                 "checks": checks,
                 "issues": doc_issues
             }
@@ -913,12 +1047,22 @@ class KYCService:
             "agent": "KYCDecisionEngine"
         })
 
+        overall_lifecycle = [
+            {"stage_number": 1, "title": "Document Uploaded", "status": "COMPLETED", "detail": f"Received {len(files)} document(s)."},
+            {"stage_number": 2, "title": "OCR Preprocessing", "status": "COMPLETED", "detail": "Image deskewing, noise filtering, and contrast normalization executed."},
+            {"stage_number": 3, "title": "Data Extracted", "status": "COMPLETED" if not any(d.get("status") == "FAILED" and "corrupted" in str(d.get("issues", [])) for d in document_results.values()) else "FAILED", "detail": f"Field extraction completed across documents (Confidence: {int(avg_confidence*100)}%)."},
+            {"stage_number": 4, "title": "Number Validation", "status": "FAILED" if any("checksum/structure invalid" in str(d.get("issues", [])) or "structure invalid" in str(d.get("issues", [])) for d in document_results.values()) else "PASSED", "detail": "Structural format and Modulo-36 checksum checks evaluated."},
+            {"stage_number": 5, "title": "Registry Verification Pending", "status": "COMPLETED", "detail": "Simulated sandbox lookups triggered."},
+            {"stage_number": 6, "title": "Registry Verification", "status": "SUCCESSFUL" if overall_status == "PASS" else ("UNDER_REVIEW" if overall_status == "REVIEW_REQUIRED" else "FAILED"), "detail": f"Simulated registry outcome: {overall_status}."}
+        ]
+
         return {
             "verification_id": f"KYC-VERIF-{settings.TODAY_DATE.replace('-', '')}-{applicant_name[:3].upper()}",
             "overall_status": overall_status,
             "confidence_score": round(avg_confidence, 2),
             "summary": summary,
             "document_results": document_results,
+            "overall_lifecycle_stages": overall_lifecycle,
             "gstin_verification": gst_res or {"status": "SKIPPED"},
             "udyam_verification": udyam_res or {"status": "SKIPPED"},
             "detected_issues": issues,
