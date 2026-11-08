@@ -1,5 +1,6 @@
 import uuid
 import datetime
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Tuple, Optional
 from app.services.catalogue_service import catalogue_service
 from app.schemas.domain import ProductSelection
@@ -111,9 +112,9 @@ class PricingService:
         total_first_month = total_monthly_recurring + gst_amount_monthly + total_one_time_setup + gst_amount_setup
 
         # Dates
-        created_dt = datetime.datetime.strptime("2026-07-15T10:00:00", "%Y-%m-%dT%H:%M:%S")
+        created_dt = datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
         expires_dt = created_dt + datetime.timedelta(days=14)
-        quote_id = f"UDY-QUO-2026-{uuid.uuid4().hex[:6].upper()}"
+        quote_id = f"UDY-QUO-{created_dt.year}-{uuid.uuid4().hex[:6].upper()}"
 
         terms = [
             f"Official quote generated under Accel Business SMB Plan Rules for {business_details.get('business_name', 'Client')}.",
@@ -131,6 +132,7 @@ class PricingService:
             "segment": business_details.get("segment", "micro"),
             "city": business_details.get("city", "Bengaluru"),
             "city_tier": city_tier,
+            "num_sites": sites,
             "tier_name": tier_name,
             "items": line_items,
             "monthly_recurring_inr": round(total_monthly_recurring, 2),

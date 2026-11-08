@@ -89,6 +89,7 @@ export interface OrderData {
   order_id: string;
   order_number: string;
   created_at: string;
+  updated_at?: string;
   current_status: string;
   status_history: {
     stage: string;
@@ -102,6 +103,13 @@ export interface OrderData {
   business_name: string;
   contact_name: string;
   installation_address: string;
+  installation_address_source?: string;
+  city?: string;
+  pincode?: string;
+  num_sites?: number;
+  quote_id?: string;
+  is_demo?: boolean;
+  activated_at?: string | null;
   monthly_amount_inr: number;
   setup_charges_inr: number;
   assigned_technician: string;

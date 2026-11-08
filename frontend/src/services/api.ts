@@ -46,12 +46,61 @@ export async function createQuote(payload: any) {
 }
 
 export async function lookupGstin(gstin: string) {
-  const res = await fetch(`${API_BASE}/kyc/lookup-gstin/${encodeURIComponent(gstin)}`);
+  const res = await fetch(`${API_BASE}/kyc/lookup-gstin/${encodeURIComponent(gstin)}?confirmed=true`);
   return res.json();
 }
 
 export async function lookupUdyam(udyam: string) {
-  const res = await fetch(`${API_BASE}/kyc/lookup-udyam/${encodeURIComponent(udyam)}`);
+  const res = await fetch(`${API_BASE}/kyc/lookup-udyam/${encodeURIComponent(udyam)}?confirmed=true`);
+  return res.json();
+}
+
+export async function extractKycIdentifiers(formData: FormData) {
+  const res = await fetch(`${API_BASE}/kyc/extract-identifiers`, { method: 'POST', body: formData });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Could not extract identifiers from the uploaded certificates');
+  }
+  return res.json();
+}
+
+export async function validateKycIdentifiers(gstin: string, udyam: string) {
+  const params = new URLSearchParams({ gstin, udyam_number: udyam });
+  const res = await fetch(`${API_BASE}/kyc/validate-identifiers?${params.toString()}`);
+  if (!res.ok) throw new Error('Could not validate the entered identifiers');
+  return res.json();
+}
+
+// Legacy standalone KYC calls remain available for existing integrations.
+export async function extractKycDocument(formData: FormData) {
+  const res = await fetch(`${API_BASE}/kyc/extract-document`, { method: 'POST', body: formData });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to extract document via OCR');
+  }
+  return res.json();
+}
+
+export async function validateIdentifierNumber(numberType: 'gstin' | 'udyam', value: string) {
+  const body = new URLSearchParams({ number_type: numberType, value });
+  const res = await fetch(`${API_BASE}/kyc/validate-number`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to validate identifier');
+  }
+  return res.json();
+}
+
+export async function fetchOcrEngineEvaluation() {
+  const res = await fetch(`${API_BASE}/kyc/ocr-evaluation`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to inspect OCR engine availability');
+  }
   return res.json();
 }
 
@@ -76,43 +125,6 @@ export async function verifyKycDocuments(formData: FormData) {
   return res.json();
 }
 
-export async function extractKycDocument(formData: FormData) {
-  const res = await fetch(`${API_BASE}/kyc/extract-document`, {
-    method: 'POST',
-    body: formData
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || 'Failed to extract document via OCR');
-  }
-  return res.json();
-}
-
-export async function validateIdentifierNumber(numberType: 'gstin' | 'udyam', value: string) {
-  const form = new URLSearchParams();
-  form.append('number_type', numberType);
-  form.append('value', value);
-  const res = await fetch(`${API_BASE}/kyc/validate-number`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form.toString()
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || 'Failed to validate identifier');
-  }
-  return res.json();
-}
-
-export async function fetchOcrEngineEvaluation() {
-  const res = await fetch(`${API_BASE}/kyc/ocr-evaluation`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || 'Failed to fetch OCR evaluation');
-  }
-  return res.json();
-}
-
 export async function fetchSpecimenDoc(specimenId: string, docType: string): Promise<Blob> {
   const res = await fetch(`${API_BASE}/kyc/specimen-file/${encodeURIComponent(specimenId)}/${encodeURIComponent(docType)}`);
   if (!res.ok) {
@@ -128,7 +140,9 @@ export async function createOrder(payload: any) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
-  return res.json();
+  const result = await res.json();
+  if (!res.ok) throw new Error(result.detail || 'Unable to create an order from the current quote.');
+  return result;
 }
 
 export async function getOrder(orderId: string) {

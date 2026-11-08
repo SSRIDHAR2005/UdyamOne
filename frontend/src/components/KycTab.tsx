@@ -2,14 +2,10 @@ import React, { useState, useRef } from 'react';
 import { 
   ShieldCheck, CheckCircle2, AlertOctagon, AlertTriangle, FileText, 
   Upload, Search, ArrowRight, Lock, Eye, RefreshCw, Check, Sparkles,
-  X, Trash2, AlertCircle, Loader2, File, Image as ImageIcon,
-  Edit3, Shield, Sliders, Cpu, Activity, ExternalLink, Info, CheckSquare
+  X, Trash2, AlertCircle, Loader2, File, Image as ImageIcon
 } from 'lucide-react';
 import type { KYCResult, QuoteData } from '../types';
-import { 
-  lookupGstin, lookupUdyam, verifyKycDocuments, fetchSpecimenDoc,
-  extractKycDocument, validateIdentifierNumber, fetchOcrEngineEvaluation
-} from '../services/api';
+import { lookupGstin, lookupUdyam, verifyKycDocuments, fetchSpecimenDoc, extractKycIdentifiers, validateKycIdentifiers } from '../services/api';
 
 interface KycTabProps {
   quoteData: QuoteData | null;
@@ -51,6 +47,11 @@ export const KycTab: React.FC<KycTabProps> = ({
   const [gstLookup, setGstLookup] = useState<any>(null);
   const [udyamLookup, setUdyamLookup] = useState<any>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrResult, setOcrResult] = useState<any>(null);
+  const [identifierValidation, setIdentifierValidation] = useState<any>(null);
+  const [identifiersConfirmed, setIdentifiersConfirmed] = useState(false);
 
   // Validation results
   const [validationResult, setValidationResult] = useState<KYCResult | null>(null);
@@ -64,15 +65,6 @@ export const KycTab: React.FC<KycTabProps> = ({
     signatory_id: { file: null, status: 'Not Uploaded', previewUrl: null, error: null, dragOver: false },
     address_proof: { file: null, status: 'Not Uploaded', previewUrl: null, error: null, dragOver: false }
   });
-
-  // Standalone OCR Extraction states for Human-in-the-Loop review & Modulo-36 validation
-  const [extractedDocs, setExtractedDocs] = useState<Partial<Record<DocType, any>>>({});
-  const [extractingDocs, setExtractingDocs] = useState<Partial<Record<DocType, boolean>>>({});
-  const [gstinLiveValidation, setGstinLiveValidation] = useState<any>(null);
-  const [udyamLiveValidation, setUdyamLiveValidation] = useState<any>(null);
-  const [showBenchmarkModal, setShowBenchmarkModal] = useState(false);
-  const [ocrEngineData, setOcrEngineData] = useState<any>(null);
-  const [benchmarkLoading, setBenchmarkLoading] = useState(false);
 
   // File input refs for each document card
   const fileInputRefs = {
@@ -100,44 +92,6 @@ export const KycTab: React.FC<KycTabProps> = ({
 
   const [activeSpecimenId, setActiveSpecimenId] = useState('K02');
 
-  // Trigger individual OCR extraction on file upload
-  const triggerOcrExtraction = async (docType: DocType, file: File) => {
-    setExtractingDocs(prev => ({ ...prev, [docType]: true }));
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('doc_type', docType);
-      const res = await extractKycDocument(formData);
-      setExtractedDocs(prev => ({ ...prev, [docType]: res }));
-
-      if (docType === 'gst_certificate') {
-        const extGst = res.extracted_fields?.gstin;
-        if (extGst) {
-          setGstin(extGst);
-          setGstinLiveValidation(res.extracted_fields?.gstin_validation || null);
-        }
-        if (res.extracted_fields?.trade_name) {
-          setBusinessName(res.extracted_fields.trade_name);
-        }
-      } else if (docType === 'udyam_certificate') {
-        const extUdy = res.extracted_fields?.udyam_number;
-        if (extUdy) {
-          setUdyamNumber(extUdy);
-          setUdyamLiveValidation(res.extracted_fields?.udyam_validation || null);
-        }
-      } else if (docType === 'signatory_id') {
-        const extSig = res.extracted_fields?.signatory_name;
-        if (extSig) {
-          setApplicantName(extSig);
-        }
-      }
-    } catch (err: any) {
-      console.warn(`Extraction error for ${docType}:`, err.message);
-    } finally {
-      setExtractingDocs(prev => ({ ...prev, [docType]: false }));
-    }
-  };
-
   // Quick preset loader
   const loadPreset = (presetId: string) => {
     setActiveSpecimenId(presetId);
@@ -151,10 +105,9 @@ export const KycTab: React.FC<KycTabProps> = ({
     setGstLookup(null);
     setUdyamLookup(null);
     setValidationResult(null);
-    setExtractedDocs({});
-    setExtractingDocs({});
-    setGstinLiveValidation(null);
-    setUdyamLiveValidation(null);
+    setOcrResult(null);
+    setIdentifierValidation(null);
+    setIdentifiersConfirmed(false);
 
     // Reset document states to Not Uploaded
     setDocFiles({
@@ -165,10 +118,9 @@ export const KycTab: React.FC<KycTabProps> = ({
     });
   };
 
-  // Auto-attach genuine specimen documents from server & trigger OCR
+  // Auto-attach genuine specimen documents from server
   const handleAutoAttachSpecimens = async () => {
     setAttachLoading(true);
-    setExtractedDocs({});
     try {
       const docTypes: DocType[] = ['gst_certificate', 'udyam_certificate', 'signatory_id', 'address_proof'];
       const updated = { ...docFiles };
@@ -186,8 +138,6 @@ export const KycTab: React.FC<KycTabProps> = ({
             error: null,
             dragOver: false
           };
-          // Trigger asynchronous OCR extraction pipeline
-          triggerOcrExtraction(dtype, file);
         } catch (err: any) {
           // Planted missing defect (e.g. K05 udyam document file missing)
           updated[dtype] = {
@@ -201,65 +151,15 @@ export const KycTab: React.FC<KycTabProps> = ({
       }
       setDocFiles(updated);
       setValidationResult(null);
+      setOcrResult(null);
+      setIdentifierValidation(null);
+      setIdentifiersConfirmed(false);
+      setGstLookup(null);
+      setUdyamLookup(null);
     } catch (err) {
       console.error(err);
     } finally {
       setAttachLoading(false);
-    }
-  };
-
-  // Live Human-in-the-Loop GSTIN update with Modulo-36 Checksum Validation
-  const handleGstinHitlChange = async (newVal: string) => {
-    const val = newVal.toUpperCase().replace(/\s+/g, '');
-    setGstin(val);
-    if (val.length === 15) {
-      try {
-        const res = await validateIdentifierNumber('gstin', val);
-        setGstinLiveValidation(res);
-      } catch (err) {
-        // quiet fallback
-      }
-    } else {
-      setGstinLiveValidation({
-        valid: false,
-        error: `GSTIN must be 15 characters (${val.length}/15)`,
-        reason: 'Length mismatch'
-      });
-    }
-  };
-
-  // Live Human-in-the-Loop Udyam update
-  const handleUdyamHitlChange = async (newVal: string) => {
-    const val = newVal.toUpperCase().replace(/\s+/g, '');
-    setUdyamNumber(val);
-    if (val.startsWith('UDYAM-') && val.length === 19) {
-      try {
-        const res = await validateIdentifierNumber('udyam', val);
-        setUdyamLiveValidation(res);
-      } catch (err) {
-      }
-    } else {
-      setUdyamLiveValidation({
-        valid: false,
-        error: 'Must follow UDYAM-XX-00-XXXXXXX format',
-        reason: 'Format mismatch'
-      });
-    }
-  };
-
-  // Open Engine Benchmark modal
-  const handleOpenBenchmark = async () => {
-    setShowBenchmarkModal(true);
-    if (!ocrEngineData) {
-      setBenchmarkLoading(true);
-      try {
-        const data = await fetchOcrEngineEvaluation();
-        setOcrEngineData(data);
-      } catch (err) {
-        console.error('Failed to load benchmark:', err);
-      } finally {
-        setBenchmarkLoading(false);
-      }
     }
   };
 
@@ -312,7 +212,13 @@ export const KycTab: React.FC<KycTabProps> = ({
       }
     }));
     setValidationResult(null);
-    triggerOcrExtraction(docType, file);
+    if (docType === 'gst_certificate' || docType === 'udyam_certificate') {
+      setOcrResult(null);
+      setIdentifierValidation(null);
+      setIdentifiersConfirmed(false);
+      setGstLookup(null);
+      setUdyamLookup(null);
+    }
   };
 
   // Remove document
@@ -330,12 +236,14 @@ export const KycTab: React.FC<KycTabProps> = ({
         dragOver: false
       }
     }));
-    setExtractedDocs(prev => {
-      const next = { ...prev };
-      delete next[docType];
-      return next;
-    });
     setValidationResult(null);
+    if (docType === 'gst_certificate' || docType === 'udyam_certificate') {
+      setOcrResult(null);
+      setIdentifierValidation(null);
+      setIdentifiersConfirmed(false);
+      setGstLookup(null);
+      setUdyamLookup(null);
+    }
   };
 
   // Drag and drop handlers
@@ -372,8 +280,47 @@ export const KycTab: React.FC<KycTabProps> = ({
   };
 
   // Mock registry query
+  const handleExtractIdentifiers = async () => {
+    const gstFile = docFiles.gst_certificate.file;
+    const udyamFile = docFiles.udyam_certificate.file;
+    if (!gstFile || !udyamFile) return;
+    setOcrLoading(true);
+    setOcrResult(null);
+    setIdentifierValidation(null);
+    setIdentifiersConfirmed(false);
+    setGstLookup(null);
+    setUdyamLookup(null);
+    try {
+      const data = new FormData();
+      data.append('gst_certificate', gstFile);
+      data.append('udyam_certificate', udyamFile);
+      const result = await extractKycIdentifiers(data);
+      setOcrResult(result);
+      if (result.gstin?.value) setGstin(result.gstin.value);
+      if (result.udyam?.value) setUdyamNumber(result.udyam.value);
+    } catch (err: any) {
+      alert(err.message || 'OCR extraction failed. Re-upload a clearer certificate.');
+    } finally {
+      setOcrLoading(false);
+    }
+  };
+
+  const handleValidateIdentifiers = async () => {
+    try {
+      const result = await validateKycIdentifiers(gstin, udyamNumber);
+      setIdentifierValidation(result);
+      setIdentifiersConfirmed(false);
+      setGstLookup(null);
+      setUdyamLookup(null);
+    } catch (err: any) {
+      alert(err.message || 'Identifier format check failed.');
+    }
+  };
+
   const handleLookup = async () => {
+    if (!identifiersConfirmed || !identifierValidation?.gstin?.valid || !identifierValidation?.udyam?.valid) return;
     setLookupLoading(true);
+    setLookupError(null);
     try {
       if (gstin) {
         const gRes = await lookupGstin(gstin);
@@ -385,6 +332,7 @@ export const KycTab: React.FC<KycTabProps> = ({
       }
     } catch (e) {
       console.error(e);
+      setLookupError('Simulated registry lookup failed. Check the connection and try again.');
     } finally {
       setLookupLoading(false);
     }
@@ -398,12 +346,13 @@ export const KycTab: React.FC<KycTabProps> = ({
     docFiles.address_proof.file
   );
 
-  const lookupCompleted = Boolean(gstLookup || udyamLookup);
+  const lookupCompleted = Boolean(gstLookup && udyamLookup);
 
   const canExecute = Boolean(
     consentGiven &&
     businessName.trim() &&
     applicantName.trim() &&
+    identifiersConfirmed &&
     lookupCompleted &&
     allFourUploaded &&
     !validating
@@ -430,6 +379,7 @@ export const KycTab: React.FC<KycTabProps> = ({
       if (gstin) formData.append('gstin', gstin);
       if (udyamNumber) formData.append('udyam_number', udyamNumber);
       formData.append('consent_given', String(consentGiven));
+      formData.append('identifiers_confirmed', String(identifiersConfirmed));
       formData.append('purposes', JSON.stringify(purposes));
       formData.append('quote_id', quoteData?.quote_id || 'DEMO-QUOTE');
 
@@ -590,179 +540,6 @@ export const KycTab: React.FC<KycTabProps> = ({
                 </button>
               </div>
             </div>
-
-            {/* Real-Time Extraction Status / AI Preprocessing */}
-            {extractingDocs[docType] && (
-              <div className="flex items-center gap-2 p-2 rounded-lg bg-blue-50 text-blue-700 text-[11px] font-semibold border border-blue-200 animate-pulse">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 flex-shrink-0" />
-                <span>AI Preprocessing (Lanczos upscaling, deskewing, Otsu) & OCR extraction...</span>
-              </div>
-            )}
-
-            {/* Standalone Extracted Data & Human-in-the-Loop Review */}
-            {extractedDocs[docType] && !extractingDocs[docType] && (
-              <div className="space-y-2 pt-1">
-                {/* Confidence & Preprocessing Meter */}
-                <div className="flex items-center justify-between text-[10px] bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200">
-                  <span className="font-semibold text-slate-600 flex items-center gap-1">
-                    <Activity className="w-3 h-3 text-red-500" />
-                    <span>OCR Confidence:</span>
-                    <strong className={extractedDocs[docType].confidence >= 0.85 ? 'text-emerald-700' : 'text-amber-700'}>
-                      {Math.round(extractedDocs[docType].confidence * 100)}%
-                    </strong>
-                  </span>
-                  <span className="text-slate-400">
-                    Deskew: {extractedDocs[docType].extracted_fields?.preprocessing_metadata?.rotation_angle_deg != null ? `${extractedDocs[docType].extracted_fields.preprocessing_metadata.rotation_angle_deg >= 0 ? '+' : ''}${extractedDocs[docType].extracted_fields.preprocessing_metadata.rotation_angle_deg.toFixed(1)}°` : '0.0°'}
-                  </span>
-                </div>
-
-                {/* Corrupted / Blank Document Callout */}
-                {extractedDocs[docType].is_corrupted_or_blank && (
-                  <div className="p-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-[10px] space-y-1">
-                    <div className="flex items-center gap-1 font-bold">
-                      <AlertOctagon className="w-3.5 h-3.5 text-red-600 flex-shrink-0" />
-                      <span>Document Unreadable / Corrupted Image Detected</span>
-                    </div>
-                    <p className="text-slate-600">
-                      Standard certificate headers could not be resolved. Please review or click "Replace" to re-upload a clearer document.
-                    </p>
-                  </div>
-                )}
-
-                {/* 6-Stage Lifecycle Mini-Stepper */}
-                {extractedDocs[docType].lifecycle_stages && (
-                  <div className="p-2 rounded-lg bg-slate-50/70 border border-slate-200 space-y-1">
-                    <span className="text-[9px] uppercase font-bold text-slate-400 block tracking-wider">
-                      6-Stage Lifecycle Pipeline
-                    </span>
-                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 text-[9px]">
-                      {extractedDocs[docType].lifecycle_stages.map((st: any) => (
-                        <div 
-                          key={st.stage_number} 
-                          title={`${st.title}: ${st.detail}`}
-                          className={`p-1 rounded text-center font-bold truncate ${
-                            st.status === 'COMPLETED' || st.status === 'PASSED'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : st.status === 'FAILED'
-                              ? 'bg-red-100 text-red-800'
-                              : 'bg-slate-200 text-slate-600'
-                          }`}
-                        >
-                          {st.title.split(' ')[0]}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Human-in-the-Loop Specific Form Fields */}
-                {docType === 'gst_certificate' && (
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-2 text-[11px]">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-800 flex items-center gap-1 text-xs">
-                        <Edit3 className="w-3 h-3 text-red-600" />
-                        <span>HITL Review: GSTIN</span>
-                      </span>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        gstinLiveValidation?.valid 
-                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
-                          : 'bg-red-100 text-red-800 border border-red-300'
-                      }`}>
-                        {gstinLiveValidation?.valid ? `✓ Mod-36 Checksum Valid (${gstinLiveValidation.state_name || 'State verified'})` : '✗ Checksum/Structure Issue'}
-                      </span>
-                    </div>
-
-                    <input
-                      type="text"
-                      value={gstin}
-                      onChange={(e) => handleGstinHitlChange(e.target.value)}
-                      className="w-full font-mono font-bold text-xs px-2.5 py-1.5 rounded border border-slate-300 bg-white text-slate-900 focus:ring-2 focus:ring-red-500 uppercase tracking-wider"
-                      placeholder="15-character GSTIN (e.g. 19EOGXH4115Y1ZL)"
-                    />
-                    {gstinLiveValidation && !gstinLiveValidation.valid && (
-                      <p className="text-[10px] text-red-600 font-medium">
-                        {gstinLiveValidation.error || gstinLiveValidation.reason}
-                      </p>
-                    )}
-
-                    <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-600 pt-1 border-t border-slate-200">
-                      <div><span className="text-slate-400">Legal Name:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.legal_name || 'Form REG-06'}</span></div>
-                      <div><span className="text-slate-400">Trade Name:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.trade_name || businessName}</span></div>
-                    </div>
-                  </div>
-                )}
-
-                {docType === 'udyam_certificate' && (
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-2 text-[11px]">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-800 flex items-center gap-1 text-xs">
-                        <Edit3 className="w-3 h-3 text-red-600" />
-                        <span>HITL Review: Udyam Number</span>
-                      </span>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        udyamLiveValidation?.valid 
-                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
-                          : 'bg-red-100 text-red-800 border border-red-300'
-                      }`}>
-                        {udyamLiveValidation?.valid ? `✓ Valid Format (${udyamLiveValidation.state_name || 'State verified'})` : '✗ Format Issue'}
-                      </span>
-                    </div>
-
-                    <input
-                      type="text"
-                      value={udyamNumber}
-                      onChange={(e) => handleUdyamHitlChange(e.target.value)}
-                      className="w-full font-mono font-bold text-xs px-2.5 py-1.5 rounded border border-slate-300 bg-white text-slate-900 focus:ring-2 focus:ring-red-500 uppercase tracking-wider"
-                      placeholder="UDYAM-XX-00-XXXXXXX"
-                    />
-                    {udyamLiveValidation && !udyamLiveValidation.valid && (
-                      <p className="text-[10px] text-red-600 font-medium">
-                        {udyamLiveValidation.error || udyamLiveValidation.reason}
-                      </p>
-                    )}
-
-                    <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-600 pt-1 border-t border-slate-200">
-                      <div><span className="text-slate-400">Enterprise:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.enterprise_name || businessName}</span></div>
-                      <div><span className="text-slate-400">Category:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.organisation_type || 'Micro / Small (Services)'}</span></div>
-                    </div>
-                  </div>
-                )}
-
-                {docType === 'signatory_id' && (
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-1.5 text-[11px]">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-800">DPDP Act Masked Identity Specimen</span>
-                      <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-                        ✓ Redacted & Protected
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[10px]">
-                      <div><span className="text-slate-400">Signatory:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.signatory_name || applicantName}</span></div>
-                      <div><span className="text-slate-400">Masked ID:</span> <span className="font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-slate-700">{extractedDocs[docType].extracted_fields?.masked_id || 'SYN-ID-***842'}</span></div>
-                    </div>
-                  </div>
-                )}
-
-                {docType === 'address_proof' && (
-                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5 space-y-1.5 text-[11px]">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-800">Utility Bill Recency (DoT 90-Day Rule)</span>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        extractedDocs[docType].extracted_fields?.is_address_expired 
-                          ? 'bg-amber-100 text-amber-800 border border-amber-300' 
-                          : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                      }`}>
-                        {extractedDocs[docType].extracted_fields?.is_address_expired ? '⚠ Expired (>90 Days)' : '✓ Compliant (<=90 Days)'}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[10px]">
-                      <div><span className="text-slate-400">Issue Date:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.address_bill_date || '2026-06-10'}</span></div>
-                      <div><span className="text-slate-400">Recency:</span> <span className="font-semibold text-slate-700">{extractedDocs[docType].extracted_fields?.days_old != null ? `${extractedDocs[docType].extracted_fields.days_old} days old` : 'Verified within 90d'}</span></div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
@@ -961,11 +738,15 @@ export const KycTab: React.FC<KycTabProps> = ({
                 <input
                   type="text"
                   value={gstin}
-                  onChange={(e) => setGstin(e.target.value.toUpperCase())}
+                  onChange={(e) => {
+                    setGstin(e.target.value.toUpperCase());
+                    setIdentifierValidation(null); setIdentifiersConfirmed(false); setGstLookup(null); setUdyamLookup(null);
+                  }}
                   placeholder="e.g. 19EOGXH4115Y1ZL"
                   maxLength={15}
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs font-mono focus:ring-2 focus:ring-red-500 focus:outline-none"
                 />
+                <p className="mt-1 text-[11px] text-slate-500">If OCR misreads a character, correct it from your certificate, check the number format, then confirm it before lookup.</p>
               </div>
 
               <div>
@@ -975,7 +756,10 @@ export const KycTab: React.FC<KycTabProps> = ({
                 <input
                   type="text"
                   value={udyamNumber}
-                  onChange={(e) => setUdyamNumber(e.target.value.toUpperCase())}
+                  onChange={(e) => {
+                    setUdyamNumber(e.target.value.toUpperCase());
+                    setIdentifierValidation(null); setIdentifiersConfirmed(false); setGstLookup(null); setUdyamLookup(null);
+                  }}
                   placeholder="UDYAM-XX-00-XXXXXXX"
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs font-mono focus:ring-2 focus:ring-red-500 focus:outline-none"
                 />
@@ -994,19 +778,62 @@ export const KycTab: React.FC<KycTabProps> = ({
               </div>
             </div>
 
+            {ocrResult && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-2">
+                <p className="font-bold text-slate-800">OCR extraction review — check and correct both numbers before registry lookup.</p>
+                {(['gstin', 'udyam'] as const).map((key) => {
+                  const item = ocrResult[key];
+                  const low = !item || item.confidence < 0.8;
+                  return (
+                    <div key={key} className={`rounded-lg border p-2 ${low || !item?.validation?.valid ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-white'}`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-bold text-slate-800">{key === 'gstin' ? 'GSTIN' : 'Udyam number'}</span>
+                        <span className={low ? 'font-semibold text-amber-800' : 'text-slate-600'}>Number confidence: {Math.round((item?.confidence || 0) * 100)}% · Document OCR: {Math.round((item?.document_confidence || 0) * 100)}% · {item?.engine || 'OCR unavailable'}</span>
+                      </div>
+                      {item?.value && <p className="mt-1 font-mono font-semibold text-slate-900">OCR candidate: {item.value}</p>}
+                      <p className={`mt-1 ${item?.validation?.valid ? 'text-emerald-800' : 'text-red-700'}`}>
+                        {item?.validation?.valid ? 'Extracted format is valid.' : item?.validation?.reason || 'Number was not extracted. Enter it manually or re-upload a clearer document.'}
+                      </p>
+                      {!item?.value && <p className="mt-1 text-amber-900">{item?.engine && item.engine !== 'none' ? `OCR read ${item.recognized_text_length || 0} characters but did not find a complete ${key === 'gstin' ? 'GSTIN' : 'Udyam number'}. Re-upload a clearer, upright image or enter the printed number manually.` : 'No OCR engine text was returned. Confirm RapidOCR is installed in the backend Python environment and restart the backend.'}</p>}
+                      {item?.fields && <p className="mt-1 text-slate-600">{key === 'gstin' ? `Legal name: ${item.fields.legal_name || 'not extracted'} · Trade name: ${item.fields.trade_name || 'not extracted'} · State: ${item.fields.state || 'not extracted'}` : `Enterprise: ${item.fields.enterprise_name || 'not extracted'} · Organisation: ${item.fields.organisation_type || 'not extracted'} · Registration date: ${item.fields.registration_date || 'not extracted'}`}</p>}
+                    </div>
+                  );
+                })}
+                <p className="text-slate-500">OCR and format checks do not establish registration status. Registry lookup below uses the project’s simulated local dataset.</p>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" onClick={handleValidateIdentifiers} className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                Check number formats
+              </button>
+              {identifierValidation && (
+                <span className={`text-xs font-semibold ${identifierValidation.gstin.valid && identifierValidation.udyam.valid ? 'text-emerald-700' : 'text-red-700'}`}>
+                  {identifierValidation.gstin.valid && identifierValidation.udyam.valid ? 'Both number formats passed.' : `${!identifierValidation.gstin.valid ? `GSTIN: ${identifierValidation.gstin.reason} ` : ''}${!identifierValidation.udyam.valid ? `Udyam: ${identifierValidation.udyam.reason}` : ''}`}
+                </span>
+              )}
+            </div>
+            {identifierValidation?.gstin?.valid && identifierValidation?.udyam?.valid && (
+              <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700">
+                <input type="checkbox" checked={identifiersConfirmed} onChange={(e) => setIdentifiersConfirmed(e.target.checked)} className="mt-0.5 rounded text-emerald-600" />
+                <span>I reviewed and confirm the GSTIN and Udyam number above. I understand the next step checks the simulated local registry separately.</span>
+              </label>
+            )}
+
             <div className="flex items-center gap-3">
               <button
                 onClick={handleLookup}
-                disabled={lookupLoading}
-                className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all"
+                disabled={lookupLoading || !identifiersConfirmed || !identifierValidation?.gstin?.valid || !identifierValidation?.udyam?.valid}
+                className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold cursor-pointer transition-all disabled:bg-slate-300 disabled:cursor-not-allowed"
               >
                 <Search className="w-3.5 h-3.5" />
-                <span>{lookupLoading ? 'Querying Registries...' : 'Instant Mock Registry Lookup'}</span>
+                <span>{lookupLoading ? 'Querying Simulated Registries...' : 'Check Simulated Registries'}</span>
               </button>
               <span className="text-[11px] text-slate-400">
-                {lookupCompleted ? '✓ Mock registry query complete' : 'Required before executing verification'}
+                {lookupCompleted ? '✓ Simulated registry query complete' : 'Requires successful format validation and your confirmation'}
               </span>
             </div>
+            {lookupError && <p role="alert" className="text-xs text-red-700">{lookupError}</p>}
 
             {/* Live Lookup Status Badges */}
             {(gstLookup || udyamLookup) && (
@@ -1016,7 +843,7 @@ export const KycTab: React.FC<KycTabProps> = ({
                     gstLookup.valid ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'
                   }`}>
                     <div className="flex items-center justify-between font-bold mb-1">
-                      <span>GST Registry: {gstLookup.status}</span>
+                      <span>Simulated GST registry: {gstLookup.status}</span>
                       {gstLookup.valid ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <AlertOctagon className="w-4 h-4 text-red-600" />}
                     </div>
                     <p className="text-[11px]">{gstLookup.message}</p>
@@ -1034,7 +861,7 @@ export const KycTab: React.FC<KycTabProps> = ({
                     udyamLookup.valid ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'
                   }`}>
                     <div className="flex items-center justify-between font-bold mb-1">
-                      <span>Udyam Registry: {udyamLookup.status}</span>
+                      <span>Simulated Udyam registry: {udyamLookup.status}</span>
                       {udyamLookup.valid ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <AlertOctagon className="w-4 h-4 text-red-600" />}
                     </div>
                     <p className="text-[11px]">{udyamLookup.message}</p>
@@ -1052,7 +879,7 @@ export const KycTab: React.FC<KycTabProps> = ({
 
           {/* STEP 3: Individual Document Upload Controls */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
                   <Upload className="w-4 h-4 text-red-600" />
@@ -1062,20 +889,9 @@ export const KycTab: React.FC<KycTabProps> = ({
                   Attach all 4 official documents (PDF, PNG, JPG). Drag and drop or browse files.
                 </p>
               </div>
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={handleOpenBenchmark}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-all cursor-pointer shadow-sm"
-                  title="Inspect PaddleOCR vs Fallback Preprocessing benchmarks & Modulo-36 accuracy"
-                >
-                  <Cpu className="w-3.5 h-3.5 text-red-600" />
-                  <span>OCR Architecture & Benchmark</span>
-                </button>
-                <span className="text-[10px] text-slate-500 font-medium bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
-                  {Object.values(docFiles).filter(d => d.file).length} of 4 Uploaded
-                </span>
-              </div>
+              <span className="text-[10px] text-slate-500 font-medium">
+                {Object.values(docFiles).filter(d => d.file).length} of 4 Uploaded
+              </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
@@ -1103,6 +919,18 @@ export const KycTab: React.FC<KycTabProps> = ({
                 'Max 90 days validity',
                 'Extracts consumer name, premises address, and bill issue date (<=90 days required).'
               )}
+            </div>
+
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold text-indigo-950">Extract and review identifiers</p>
+                <p className="text-[11px] text-indigo-800">OCR reads the GST and Udyam certificates only. It does not query a registry.</p>
+              </div>
+              <button type="button" onClick={handleExtractIdentifiers}
+                disabled={ocrLoading || !docFiles.gst_certificate.file || !docFiles.udyam_certificate.file}
+                className="px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-semibold disabled:bg-slate-300 disabled:cursor-not-allowed">
+                {ocrLoading ? 'Processing certificates…' : 'Extract identifiers for review'}
+              </button>
             </div>
 
             {/* Execution Button & Readiness Validation Message */}
@@ -1198,8 +1026,14 @@ export const KycTab: React.FC<KycTabProps> = ({
                           <div className="bg-white p-2.5 rounded-lg border border-slate-100 text-[11px] space-y-1 text-slate-600">
                             {docInfo.extracted_fields.gstin && (
                               <div className="flex justify-between">
-                                <span className="text-slate-400">Extracted GSTIN:</span>
+                                <span className="text-slate-400">{docInfo.extracted_fields.gstin_source === 'MANUAL_CONFIRMED' ? 'Manually confirmed GSTIN:' : 'Extracted GSTIN:'}</span>
                                 <span className="font-mono font-bold text-slate-800">{docInfo.extracted_fields.gstin}</span>
+                              </div>
+                            )}
+                            {docInfo.extracted_fields.gstin_source === 'MANUAL_CONFIRMED' && docInfo.extracted_fields.gstin_ocr_candidate && (
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">OCR candidate:</span>
+                                <span className="font-mono text-amber-800">{docInfo.extracted_fields.gstin_ocr_candidate}</span>
                               </div>
                             )}
                             {docInfo.extracted_fields.trade_name && (
@@ -1400,132 +1234,6 @@ export const KycTab: React.FC<KycTabProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Benchmark & OCR Architecture Modal */}
-      {showBenchmarkModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-              <div className="flex items-center gap-2">
-                <div className="p-2 bg-red-100 text-red-600 rounded-lg">
-                  <Cpu className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900 text-base">UdyamOne OCR Architecture & Engine Benchmark</h3>
-                  <p className="text-xs text-slate-500">Image Preprocessing, PaddleOCR Evaluation & Strict Validation</p>
-                </div>
-              </div>
-              <button 
-                type="button" 
-                onClick={() => setShowBenchmarkModal(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-all cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {benchmarkLoading ? (
-              <div className="py-12 flex flex-col items-center justify-center gap-3">
-                <Loader2 className="w-8 h-8 animate-spin text-red-600" />
-                <span className="text-xs font-semibold text-slate-600">Loading benchmark telemetry...</span>
-              </div>
-            ) : (
-              <div className="space-y-4 text-xs text-slate-600">
-                {/* Preprocessing Pipeline */}
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
-                  <h4 className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                    <Sliders className="w-4 h-4 text-red-600" />
-                    <span>OpenCV & Pure NumPy/SciPy Preprocessing Pipeline</span>
-                  </h4>
-                  <ul className="list-disc pl-5 space-y-1 text-[11px] text-slate-600">
-                    <li><strong>Lanczos-4 Resolution Upscaling:</strong> Scales low-res mobile scans to target 1600px width (approx. 300 DPI print quality) for optimal OCR glyph isolation.</li>
-                    <li><strong>Projection Profile Deskewing:</strong> Analyzes horizontal line variance from -15° to +15° in 0.5° increments and rotates document to 0.0° orthogonal orientation.</li>
-                    <li><strong>Sauvola / Otsu Adaptive Thresholding:</strong> Reconstructs uneven lighting, shadows, and low-contrast mobile camera artifacts.</li>
-                    <li><strong>Noise Reduction & Unsharp Masking:</strong> Blurs high-frequency digital camera sensor noise while sharpening letter borders.</li>
-                  </ul>
-                </div>
-
-                {/* Comparative Benchmark Table */}
-                <div className="border border-slate-200 rounded-xl overflow-hidden">
-                  <table className="w-full text-[11px] text-left border-collapse">
-                    <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
-                      <tr>
-                        <th className="p-2.5">Evaluation Metric</th>
-                        <th className="p-2.5">PaddleOCR (Primary Engine)</th>
-                        <th className="p-2.5">UdyamOne Preprocessed Fallback</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      <tr>
-                        <td className="p-2.5 font-medium text-slate-800">GSTIN Field Accuracy</td>
-                        <td className="p-2.5 font-mono text-emerald-700 font-bold">98.4%</td>
-                        <td className="p-2.5 font-mono text-emerald-700 font-bold">96.0%</td>
-                      </tr>
-                      <tr>
-                        <td className="p-2.5 font-medium text-slate-800">Udyam Number Accuracy</td>
-                        <td className="p-2.5 font-mono text-emerald-700 font-bold">98.1%</td>
-                        <td className="p-2.5 font-mono text-emerald-700 font-bold">95.0%</td>
-                      </tr>
-                      <tr>
-                        <td className="p-2.5 font-medium text-slate-800">Character Error Rate (CER)</td>
-                        <td className="p-2.5 font-mono text-slate-700">1.2%</td>
-                        <td className="p-2.5 font-mono text-slate-700">2.1%</td>
-                      </tr>
-                      <tr>
-                        <td className="p-2.5 font-medium text-slate-800">Processing Latency</td>
-                        <td className="p-2.5 font-mono text-slate-700">320ms (GPU) / 850ms (CPU)</td>
-                        <td className="p-2.5 font-mono text-emerald-700 font-bold">140ms (Local Vector/Hash)</td>
-                      </tr>
-                      <tr>
-                        <td className="p-2.5 font-medium text-slate-800">Rotation & Skew Tolerance</td>
-                        <td className="p-2.5 text-slate-700">±25° (Direction Classifier)</td>
-                        <td className="p-2.5 text-slate-700">±15° (Projection Profile Deskew)</td>
-                      </tr>
-                      <tr>
-                        <td className="p-2.5 font-medium text-slate-800">Indian State Codes Supported</td>
-                        <td className="p-2.5 text-slate-700">All 38 States/UTs + 97/99</td>
-                        <td className="p-2.5 text-slate-700">All 38 States/UTs + 97/99</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Modulo-36 & Checksum Specifications */}
-                <div className="bg-emerald-50 p-3.5 rounded-xl border border-emerald-200 text-[11px] text-emerald-900 space-y-1">
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <CheckSquare className="w-4 h-4 text-emerald-600" />
-                    <span>Official GST Council Modulo-36 Checksum Enforcement</span>
-                  </div>
-                  <p className="text-emerald-800">
-                    Calculated over the first 14 characters of the GSTIN using odd/even weighted factor arithmetic modulo 36. Ensures zero accidental typos, transpositions, or OCR misreads pass through to registration lookup.
-                  </p>
-                </div>
-
-                {/* Simulated Verification Notice */}
-                <div className="bg-amber-50 p-3.5 rounded-xl border border-amber-200 text-[11px] text-amber-900 space-y-1">
-                  <span className="font-bold flex items-center gap-1">
-                    <Info className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Simulated Mock Sandbox Disclosure</span>
-                  </span>
-                  <p className="text-amber-800">
-                    A valid number format and Modulo-36 checksum passes syntax validation, but does NOT guarantee active government registration. All active/cancelled statuses are queried against synthetic mock registries for hackathon demonstration.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <div className="pt-2 flex justify-end border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setShowBenchmarkModal(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-xl shadow-sm cursor-pointer"
-              >
-                Close Specifications
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

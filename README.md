@@ -83,6 +83,20 @@ set PYTHONPATH=.
 - `test_executive_analytics_funnel_numbers`: Validates exact case numbers (5,000 -> 3,406 -> 1,974 -> 861 -> 588 -> 368).
 - `test_order_activation_lifecycle`: Validates order placement and 7-stage status transitions.
 
+### KYC OCR setup (Windows)
+
+Image preprocessing uses OpenCV. RapidOCR with ONNX Runtime runs locally as the primary OCR engine; optional PaddleOCR and Tesseract paths are fallbacks, followed by embedded PDF text extraction. From the project root, install the standard backend and OCR packages into the same Python environment used to run FastAPI:
+
+```powershell
+py -3.13 -m pip install -r backend/requirements.txt
+py -3.13 -m pip install -r backend/requirements-ocr.txt
+py -3.13 -c "from rapidocr import RapidOCR; import onnxruntime; print('RapidOCR/ONNX Runtime ready')"
+```
+
+The current `rapidocr` package replaces the older `rapidocr-onnxruntime` package; it bundles its default models for local inference. The default model recognizes English and Chinese. The screenshot's reported 47-document run is not reproducible from this checkout because those specimen images and a ground-truth manifest are absent. Do not treat a reported OCR confidence as a measured accuracy result without those files. Tesseract is an optional fallback and requires its Windows installer in addition to the Python package. If OCR engines are unavailable, extraction fails for review; the service does not infer or repair registration numbers.
+
+`GET /api/v1/kyc/validate-identifiers` checks number format and checksum only. `POST /api/v1/kyc/extract-identifiers` performs OCR and validation without registry access. Existing registry routes use the project's **simulated local datasets**, not government systems. The upload screen requires users to review and confirm both numbers before those routes can be called.
+
 ---
 
 ## 📊 Dataset & Specimen Document Integration
@@ -91,9 +105,9 @@ set PYTHONPATH=.
 |---|---|---|
 | `product_catalogue.csv` | 25 SKUs | Ingested by `CatalogueService`. Powers bundle recommendation constraint solver, pricing formulas, and dependency graph. |
 | `smb_leads.csv` | 5,000 Leads | Ingested by `AnalyticsService` for historical baseline KPIs, and by `LeadScoringService` to train pre-conversion machine learning models. |
-| `mock_gstin_registry.csv` | 3,534 Records | Backs the Mock GSTIN lookup API with real Active, Suspended, and Cancelled tax statuses. |
-| `mock_udyam_registry.csv` | 2,723 Records | Backs the Mock Udyam lookup API with Micro, Small, and Medium classifications. |
-| `kyc_documents/` | 47 Images (K01–K12) | Evaluated by native OCR and cross-validation rule engine. Catches planted defects: K01 (Cancelled GSTIN), K04 (Corrupted Doc), K05 (Missing Udyam Doc), K07 (Name Mismatch), and K11 (Address Proof Expired >90 Days from `2026-07-15`). |
+| `mock_gstin_registry.csv` | 3,534 Records | Backs a simulated GSTIN lookup with synthetic Active, Suspended, and Cancelled records. |
+| `mock_udyam_registry.csv` | 2,723 Records | Backs a simulated Udyam lookup with synthetic enterprise classifications. |
+| `kyc_documents/` | 47 Images (K01–K12) | Intended specimen set for OCR and cross-validation checks. |
 
 ---
 

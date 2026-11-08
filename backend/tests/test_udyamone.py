@@ -204,9 +204,16 @@ def test_order_activation_lifecycle():
         "items": [{"product_name": "Biz Fibre 100", "quantity": 1, "typical_install_days": 5}]
     }
     cust = {"business_name": "Test Clinic", "city": "Jaipur"}
+    before_create = datetime.datetime.now().astimezone()
     ord_obj = order_service.create_order(mock_quote, "KYC-001", cust)
+    created_at = datetime.datetime.fromisoformat(ord_obj["created_at"])
+    target_at = datetime.datetime.fromisoformat(ord_obj["estimated_activation_date"])
+    assert abs((created_at - before_create).total_seconds()) < 5
+    assert target_at - created_at == datetime.timedelta(days=5)
+    assert ord_obj["monthly_amount_inr"] == mock_quote["monthly_recurring_inr"]
     assert ord_obj["current_status"] == "KYC_VERIFIED"
 
     # Advance stage
     updated = order_service.update_order_status(ord_obj["order_id"], "ACTIVATED", "Line active")
     assert updated["current_status"] == "ACTIVATED"
+    assert datetime.datetime.fromisoformat(updated["activated_at"]) <= datetime.datetime.now().astimezone()

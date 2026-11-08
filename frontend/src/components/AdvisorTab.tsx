@@ -763,6 +763,35 @@ export const AdvisorTab: React.FC<AdvisorTabProps> = ({
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Site PIN Code
+                </label>
+                <input
+                  type="text"
+                  value={formData.pincode}
+                  onChange={(e) => setFormData({ ...formData, pincode: e.target.value.replace(/\D/g, '').slice(0, 6) })}
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="6-digit PIN code"
+                  className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm focus:ring-2 focus:ring-red-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Installation Site Address
+                </label>
+                <textarea
+                  value={formData.site_address}
+                  onChange={(e) => setFormData({ ...formData, site_address: e.target.value })}
+                  placeholder="Enter the actual shop, office, or clinic address"
+                  rows={2}
+                  className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm focus:ring-2 focus:ring-red-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">This address is used on the service order. If left blank, the uploaded address proof is used where available.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
                   City Tier
                 </label>
                 <select

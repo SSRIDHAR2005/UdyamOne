@@ -46,6 +46,7 @@ export function App() {
     city: 'Bengaluru',
     city_tier: 1,
     pincode: '560034',
+    site_address: '',
     employee_count: 8,
     num_sites: 1,
     monthly_budget_inr: 4500,
@@ -374,14 +375,26 @@ export function App() {
     if (!quoteData) return;
 
     try {
+      const proofAddress = kycRes.document_results?.address_proof?.extracted_fields?.service_address;
+      const usableProofAddress = typeof proofAddress === 'string' && proofAddress.trim() && proofAddress !== 'Unextracted'
+        ? proofAddress.trim()
+        : '';
+      const profileAddress = formData.site_address.trim();
+      const installationAddress = profileAddress
+        || usableProofAddress
+        || [formData.city, formData.pincode].filter(Boolean).join(', ');
+      const installationAddressSource = profileAddress
+        ? 'BUSINESS_PROFILE'
+        : usableProofAddress ? 'UPLOADED_ADDRESS_PROOF' : 'CITY_PIN_FALLBACK';
       const newOrder = await createOrder({
         quote_id: quoteData.quote_id,
         kyc_id: kycRes.verification_id,
-        business_name: quoteData.business_name,
-        contact_name: formData.business_name.includes('Dr.') ? 'Dr. Meera' : 'Ramesh Kumar',
+        business_name: formData.business_name || quoteData.business_name,
+        contact_name: 'Business Owner',
         contact_phone: '+91 98765 43210',
-        contact_email: 'contact@enterprise.in',
-        installation_address: `${formData.city} Central Office, Pin ${formData.pincode}`,
+        contact_email: '',
+        installation_address: installationAddress,
+        installation_address_source: installationAddressSource,
         city: formData.city,
         pincode: formData.pincode
       });
@@ -389,6 +402,7 @@ export function App() {
       setActiveTab('tracker');
     } catch (e) {
       console.error(e);
+      alert(e instanceof Error ? e.message : 'Unable to create the order. Recalculate the quote and try again.');
     }
   };
 
