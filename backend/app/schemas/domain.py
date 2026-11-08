@@ -119,6 +119,7 @@ class QuoteResponse(BaseModel):
     segment: str
     city: str
     city_tier: int
+    num_sites: int = 1
     items: List[Dict[str, Any]]
     monthly_recurring_inr: float
     one_time_setup_inr: float
@@ -152,6 +153,7 @@ class KYCSubmitRequest(BaseModel):
     applicant_name: str
     applicant_role: str
     consent: DPDPUserConsent
+    identifiers_confirmed: bool = False
 
 class KYCValidationResult(BaseModel):
     verification_id: str
@@ -173,6 +175,7 @@ class CreateOrderRequest(BaseModel):
     contact_phone: str
     contact_email: str
     installation_address: str
+    installation_address_source: Optional[str] = None
     city: str
     pincode: str
     payment_method: str = "SIMULATED_MANDATE"
@@ -186,6 +189,7 @@ class OrderResponse(BaseModel):
     order_id: str
     order_number: str
     created_at: str
+    updated_at: Optional[str] = None
     current_status: str
     status_history: List[Dict[str, Any]]
     estimated_activation_date: str
@@ -194,6 +198,13 @@ class OrderResponse(BaseModel):
     business_name: str
     contact_name: str
     installation_address: str
+    installation_address_source: Optional[str] = None
+    city: Optional[str] = None
+    pincode: Optional[str] = None
+    num_sites: int = 1
+    quote_id: Optional[str] = None
+    is_demo: bool = False
+    activated_at: Optional[str] = None
     monthly_amount_inr: float
     setup_charges_inr: float
     assigned_technician: str

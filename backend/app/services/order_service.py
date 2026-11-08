@@ -1,5 +1,6 @@
 import uuid
 import datetime
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
 from app.core.config import settings
 
@@ -20,13 +21,16 @@ class OrderService:
         self._init_demo_orders()
 
     def _init_demo_orders(self):
-        # Seed an initial realistic order for demo
+        # Seed an explicitly labeled demonstration order using dates relative
+        # to the current local time; it is not presented as a customer record.
         demo_id = "ORD-2026-88219"
-        ref_today = datetime.datetime.strptime("2026-07-15T11:00:00", "%Y-%m-%dT%H:%M:%S")
+        ref_today = datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
+        day = datetime.timedelta(days=1)
+        start = ref_today - 2 * day
         self.orders[demo_id] = {
             "order_id": demo_id,
             "order_number": demo_id,
-            "created_at": ref_today.isoformat(),
+            "created_at": start.isoformat(),
             "updated_at": ref_today.isoformat(),
             "quote_id": "UDY-QUO-2026-DEMO01",
             "business_name": "Saffron Bakers",
@@ -34,10 +38,12 @@ class OrderService:
             "contact_phone": "+91 98765 43210",
             "contact_email": "orders@saffronbakers.in",
             "installation_address": "Shop 83, Market Yard, Ludhiana, Punjab - 416059",
+            "installation_address_source": "DEMO_SAMPLE",
             "city": "Ludhiana",
             "pincode": "416059",
-            "monthly_amount_inr": 2597.0,
+            "monthly_amount_inr": 3195.0,
             "setup_charges_inr": 2500.0,
+            "num_sites": 1,
             "items_summary": [
                 {"name": "Biz Fibre 100", "qty": 1, "monthly": 999.0},
                 {"name": "Business Postpaid 299", "qty": 2, "monthly": 598.0},
@@ -46,22 +52,24 @@ class OrderService:
             ],
             "current_status": "INSTALLATION_SCHEDULED",
             "status_history": [
-                {"stage": "PLACED", "timestamp": "2026-07-12T09:30:00", "completed": True, "note": "Order booked via UdyamOne digital portal"},
-                {"stage": "KYC_VERIFIED", "timestamp": "2026-07-12T09:35:00", "completed": True, "note": "Instant GSTIN 03PJNXS4821G1ZB verified Active"},
-                {"stage": "CONFIRMED", "timestamp": "2026-07-12T14:00:00", "completed": True, "note": "Commercial order booked and SIM dispatched"},
-                {"stage": "FEASIBILITY_CHECKED", "timestamp": "2026-07-13T11:20:00", "completed": True, "note": "Fiber splitter port #4 assigned at Ludhiana Central OLT"},
-                {"stage": "INSTALLATION_SCHEDULED", "timestamp": "2026-07-14T10:00:00", "completed": True, "note": "Appointment confirmed for 2026-07-16 11:30 AM with Field Lead Ramesh Verma"},
-                {"stage": "INSTALLATION_IN_PROGRESS", "timestamp": None, "completed": False, "note": "Awaiting technician arrival on site"},
-                {"stage": "ACTIVATED", "timestamp": None, "completed": False, "note": "Line activation pending completion of physical cabling"}
+                {"stage": "PLACED", "timestamp": start.isoformat(), "completed": True, "note": "Sample order placed in the UdyamOne demo tracker."},
+                {"stage": "KYC_VERIFIED", "timestamp": (start + datetime.timedelta(minutes=5)).isoformat(), "completed": True, "note": "Sample KYC stage completed for demonstration."},
+                {"stage": "CONFIRMED", "timestamp": (start + datetime.timedelta(hours=4)).isoformat(), "completed": True, "note": "Sample commercial booking confirmed."},
+                {"stage": "FEASIBILITY_CHECKED", "timestamp": (ref_today - day).isoformat(), "completed": True, "note": "Sample network feasibility stage completed."},
+                {"stage": "INSTALLATION_SCHEDULED", "timestamp": ref_today.isoformat(), "completed": True, "note": f"Sample appointment scheduled for {(ref_today + day).strftime('%d %b %Y')} (demo data)."},
+                {"stage": "INSTALLATION_IN_PROGRESS", "timestamp": None, "completed": False, "note": "Awaiting the sample technician visit."},
+                {"stage": "ACTIVATED", "timestamp": None, "completed": False, "note": "Activation is pending in this demonstration order."}
             ],
             "assigned_technician": "Ramesh Verma (Senior Fiber Specialist)",
             "technician_contact": "+91 98112 00445",
             "estimated_activation_date": (ref_today + datetime.timedelta(days=2)).isoformat(),
-            "confirmed_appointment_date": "2026-07-16T11:30:00",
+            "confirmed_appointment_date": (ref_today + day).isoformat(),
+            "activated_at": None,
+            "is_demo": True,
             "delay_alert": None,
             "notifications": [
-                {"timestamp": "2026-07-12T09:36:00", "channel": "SMS", "message": "Airtel Business: Your order ORD-2026-88219 is confirmed. KYC passed."},
-                {"timestamp": "2026-07-14T10:05:00", "channel": "WhatsApp", "message": "Engineer Ramesh Verma scheduled for visit on 16 July at 11:30 AM."}
+                {"timestamp": (start + datetime.timedelta(minutes=6)).isoformat(), "channel": "SMS", "message": f"Sample order {demo_id} is confirmed in the demonstration tracker."},
+                {"timestamp": ref_today.isoformat(), "channel": "WhatsApp", "message": f"Sample technician visit scheduled for {(ref_today + day).strftime('%d %b %Y')} (demo data)."}
             ]
         }
 
@@ -71,11 +79,11 @@ class OrderService:
         kyc_id: Optional[str],
         customer_info: Dict[str, Any]
     ) -> Dict[str, Any]:
-        order_num = f"ORD-2026-{uuid.uuid4().hex[:6].upper()}"
-        now_dt = datetime.datetime.strptime("2026-07-15T12:00:00", "%Y-%m-%dT%H:%M:%S")
+        now_dt = datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
+        order_num = f"ORD-{now_dt.year}-{uuid.uuid4().hex[:6].upper()}"
         
         # Calculate install days from quote items
-        max_install_days = 5
+        install_days = []
         items_summary = []
         for it in quote_data.get("items", []):
             items_summary.append({
@@ -84,9 +92,10 @@ class OrderService:
                 "monthly": it.get("total_monthly_inr", 0)
             })
             days = it.get("typical_install_days", 5)
-            if days > max_install_days:
-                max_install_days = days
+            if isinstance(days, (int, float)) and days > 0:
+                install_days.append(int(days))
 
+        max_install_days = max(install_days, default=5)
         est_act = now_dt + datetime.timedelta(days=max_install_days)
 
         history = []
@@ -115,8 +124,10 @@ class OrderService:
             "contact_phone": customer_info.get("contact_phone", "+91 98765 00000"),
             "contact_email": customer_info.get("contact_email", "contact@business.com"),
             "installation_address": customer_info.get("installation_address", "Registered Office"),
+            "installation_address_source": customer_info.get("installation_address_source", "CUSTOMER_PROVIDED"),
             "city": customer_info.get("city", quote_data.get("city", "Bengaluru")),
             "pincode": customer_info.get("pincode", "560001"),
+            "num_sites": int(quote_data.get("num_sites", 1)),
             "monthly_amount_inr": quote_data.get("monthly_recurring_inr", 1500.0),
             "setup_charges_inr": quote_data.get("one_time_setup_inr", 0.0),
             "items_summary": items_summary,
@@ -126,6 +137,8 @@ class OrderService:
             "technician_contact": "+91 1800-103-4444",
             "estimated_activation_date": est_act.isoformat(),
             "confirmed_appointment_date": None,
+            "activated_at": None,
+            "is_demo": False,
             "delay_alert": None,
             "notifications": [
                 {"timestamp": now_dt.isoformat(), "channel": "SMS", "message": f"Accel Business: Order {order_num} successfully placed! Track status at udyamone.airtel.in"}
@@ -144,7 +157,7 @@ class OrderService:
         
         order = self.orders[order_id]
         order["current_status"] = new_stage
-        order["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        order["updated_at"] = datetime.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
         
         # Update history
         stage_idx = -1
@@ -158,7 +171,7 @@ class OrderService:
                 if j <= stage_idx:
                     order["status_history"][j]["completed"] = True
                     if not order["status_history"][j]["timestamp"]:
-                        order["status_history"][j]["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        order["status_history"][j]["timestamp"] = datetime.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
                 else:
                     order["status_history"][j]["completed"] = False
 
@@ -166,9 +179,10 @@ class OrderService:
                 order["status_history"][stage_idx]["note"] = note
 
         if new_stage == "ACTIVATED":
+            order["activated_at"] = datetime.datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
             order["delay_alert"] = None
             order["notifications"].append({
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "timestamp": order["activated_at"],
                 "channel": "WhatsApp",
                 "message": f"Congratulations! Your business connectivity & cloud bundle is now ACTIVE."
             })

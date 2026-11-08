@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   CheckCircle2, Clock, AlertCircle, Phone, User, MapPin, 
   Wifi, Calendar, Bell, FastForward, Check, Sparkles 
@@ -26,6 +26,12 @@ export const TrackerTab: React.FC<TrackerTabProps> = ({
   onOrderUpdated
 }) => {
   const [updating, setUpdating] = useState(false);
+  const [clockNow, setClockNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   if (!orderData) {
     return (
@@ -42,6 +48,14 @@ export const TrackerTab: React.FC<TrackerTabProps> = ({
   }
 
   const currentStageIndex = STAGES.findIndex((s) => s.stage === orderData.current_status);
+  const dateTime = (value?: string | null) => value
+    ? new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+    : 'Pending';
+  const isActivated = orderData.current_status === 'ACTIVATED' && Boolean(orderData.activated_at);
+  const activationDate = isActivated ? orderData.activated_at : orderData.estimated_activation_date;
+  const activationDeltaDays = activationDate
+    ? Math.ceil((new Date(activationDate).getTime() - clockNow) / 86_400_000)
+    : null;
 
   const handleAdvanceStage = async () => {
     if (currentStageIndex < STAGES.length - 1) {
@@ -71,7 +85,7 @@ export const TrackerTab: React.FC<TrackerTabProps> = ({
             Real-Time Service Delivery & Installation Timeline
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Replaces repeated customer status calls with transparent tracking, proactive alerts, and scheduled field appointments.
+            Order milestones, site details, quoted charges, and activation target from the current order record.
           </p>
         </div>
 
@@ -105,10 +119,15 @@ export const TrackerTab: React.FC<TrackerTabProps> = ({
                 <p className="font-mono text-base font-bold text-slate-900">{orderData.order_number}</p>
               </div>
               <div className="text-right">
-                <span className="text-[10px] uppercase font-bold text-slate-400">Target Activation</span>
-                <p className="text-xs font-bold text-red-600">
-                  {orderData.estimated_activation_date ? new Date(orderData.estimated_activation_date).toLocaleDateString() : 'Pending'}
-                </p>
+                <span className="text-[10px] uppercase font-bold text-slate-400">{isActivated ? 'Activated At' : 'Estimated Target Activation'}</span>
+                <p className="text-xs font-bold text-red-600">{dateTime(activationDate)}</p>
+                {!isActivated && activationDeltaDays !== null && (
+                  <p className={`text-[10px] font-semibold ${activationDeltaDays < 0 ? 'text-red-700' : 'text-slate-500'}`}>
+                    {activationDeltaDays < 0 ? `${Math.abs(activationDeltaDays)} day(s) overdue` : activationDeltaDays === 0 ? 'Target is today' : `In ${activationDeltaDays} day(s)`}
+                  </p>
+                )}
+                {orderData.is_demo && <span className="mt-1 inline-block rounded bg-amber-100 px-2 py-0.5 text-[9px] font-bold uppercase text-amber-800">Demo sample order</span>}
+                {orderData.updated_at && <p className="mt-1 text-[9px] text-slate-400">Updated {dateTime(orderData.updated_at)}</p>}
               </div>
             </div>
 
@@ -142,6 +161,9 @@ export const TrackerTab: React.FC<TrackerTabProps> = ({
                         )}
                       </div>
                       <p className="text-xs text-slate-500 mt-0.5">{s.desc}</p>
+                      {orderData.status_history[idx]?.timestamp && (
+                        <p className="mt-1 text-[10px] text-slate-400">{dateTime(orderData.status_history[idx].timestamp)}</p>
+                      )}
                       {orderData.status_history[idx]?.note && (
                         <p className="text-[11px] text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-2 mt-2">
                           <strong>Update:</strong> {orderData.status_history[idx].note}
@@ -215,15 +237,40 @@ export const TrackerTab: React.FC<TrackerTabProps> = ({
                 <MapPin className="w-3.5 h-3.5 text-slate-400 flex-shrink-0 mt-0.5" />
                 <span>{orderData.installation_address}</span>
               </span>
+              {orderData.installation_address_source && <span className="ml-4 text-[10px] text-slate-400">Source: {orderData.installation_address_source.replaceAll('_', ' ').toLowerCase()}</span>}
             </div>
+            {(orderData.city || orderData.pincode) && (
+              <div className="flex justify-between">
+                <span className="text-slate-500">City / PIN</span>
+                <span className="font-semibold text-slate-800">{[orderData.city, orderData.pincode].filter(Boolean).join(' · ')}</span>
+              </div>
+            )}
+            {orderData.num_sites !== undefined && (
+              <div className="flex justify-between">
+                <span className="text-slate-500">Sites on quote</span>
+                <span className="font-semibold text-slate-800">{orderData.num_sites}</span>
+              </div>
+            )}
+            {orderData.items_summary?.length > 0 && (
+              <div className="border-t border-slate-100 pt-3 space-y-2">
+                <span className="text-slate-400 block text-[10px] uppercase font-bold">Selected quote items</span>
+                {orderData.items_summary.map((item: any, index: number) => (
+                  <div key={`${item.name}-${index}`} className="flex justify-between gap-3 text-[11px]">
+                    <span className="text-slate-600">{item.name} × {item.qty}</span>
+                    <span className="font-semibold text-slate-800">₹{Number(item.monthly || 0).toLocaleString()}/mo</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="border-t border-slate-100 pt-3 flex justify-between">
-              <span className="text-slate-500">Monthly Plan Cost</span>
+              <span className="text-slate-500">Quoted monthly subtotal</span>
               <span className="font-bold text-slate-900">₹{orderData.monthly_amount_inr.toLocaleString()}/mo</span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">One-Time Setup Fee</span>
               <span className="font-semibold text-slate-800">₹{orderData.setup_charges_inr.toLocaleString()}</span>
             </div>
+            {orderData.quote_id && <p className="border-t border-slate-100 pt-2 text-[10px] text-slate-400">Quote reference: {orderData.quote_id}</p>}
           </div>
         </div>
       </div>

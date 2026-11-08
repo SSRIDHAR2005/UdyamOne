@@ -16,7 +16,6 @@ from app.services.pricing_service import pricing_service
 from app.services.pdf_service import pdf_service
 from app.services.kyc_service import kyc_service
 from app.services.ocr_service import ocr_service
-from app.services.number_validator import number_validator
 from app.services.order_service import order_service
 from app.services.lead_scoring_service import lead_scoring_service
 from app.services.analytics_service import analytics_service
@@ -105,12 +104,197 @@ def generate_quote_pdf_from_body(quote_data: Dict[str, Any]):
 
 # --- Smart Digital KYC Endpoints ---
 @api_router.get("/kyc/lookup-gstin/{gstin}")
-def lookup_gstin(gstin: str):
-    return kyc_service.lookup_gstin(gstin)
+def lookup_gstin(gstin: str, confirmed: bool = False):
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="User confirmation is required before registry lookup.")
+    result = kyc_service.lookup_gstin(gstin)
+    result["verification_source"] = "SIMULATED_LOCAL_REGISTRY"
+    return result
 
 @api_router.get("/kyc/lookup-udyam/{udyam_number}")
-def lookup_udyam(udyam_number: str):
-    return kyc_service.lookup_udyam(udyam_number)
+def lookup_udyam(udyam_number: str, confirmed: bool = False):
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="User confirmation is required before registry lookup.")
+    result = kyc_service.lookup_udyam(udyam_number)
+    result["verification_source"] = "SIMULATED_LOCAL_REGISTRY"
+    return result
+
+@api_router.get("/kyc/validate-identifiers")
+def validate_kyc_identifiers(gstin: Optional[str] = None, udyam_number: Optional[str] = None):
+    """Format/checksum validation only. This route does not query a registry."""
+    return {
+        "gstin": kyc_service.validate_gstin_format(gstin) if gstin else {"valid": False, "reason": "Enter a GSTIN."},
+        "udyam": kyc_service.validate_udyam_format(udyam_number) if udyam_number else {"valid": False, "reason": "Enter a Udyam number."},
+        "registry_queried": False,
+    }
+
+@api_router.post("/kyc/extract-identifiers")
+async def extract_kyc_identifiers(
+    gst_certificate: UploadFile = File(...),
+    udyam_certificate: UploadFile = File(...),
+):
+    """Run OCR and format validation only; no registry access occurs here."""
+    results = {}
+    for key, upload, doc_type in (
+        ("gstin", gst_certificate, "gst_certificate"),
+        ("udyam", udyam_certificate, "udyam_certificate"),
+    ):
+        content = await upload.read()
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail=f"{upload.filename} exceeds the 10 MB limit.")
+        parsed = ocr_service.extract_document_fields(upload.filename or "upload", content, doc_type)
+        value = parsed.get("gstin") if key == "gstin" else parsed.get("udyam_number")
+        validation = (kyc_service.validate_gstin_format(value) if key == "gstin" else
+                      kyc_service.validate_udyam_format(value)) if value else {"valid": False, "reason": "No complete number was extracted. Re-upload a clearer certificate or enter the number manually."}
+        if not value:
+            import logging
+            logging.getLogger(__name__).warning(
+                "No %s extracted from uploaded %s (engine=%s, recognized_text_length=%s)",
+                key, upload.filename or "certificate", parsed.get("ocr_engine", "none"), parsed.get("raw_text_length", 0)
+            )
+        results[key] = {
+            "value": value,
+            "confidence": float(parsed.get("field_confidence", {}).get("gstin" if key == "gstin" else "udyam_number", 0.0)),
+            "document_confidence": float(parsed.get("confidence", 0.0)),
+            "recognized_text_length": int(parsed.get("raw_text_length", 0)),
+            "validation": validation,
+            "status": "DATA_EXTRACTED" if value else "OCR_FAILED",
+            "engine": parsed.get("ocr_engine", "none"),
+            "detected_document_type": parsed.get("detected_document_type", "unknown"),
+            "workflow_status": {
+                "document_uploaded": "COMPLETED",
+                "ocr_processing": "COMPLETED" if parsed.get("ocr_engine") not in {"none", ""} else "FAILED",
+                "data_extracted": "COMPLETED" if value else "FAILED",
+                "number_validation": "PASSED" if validation["valid"] else "FAILED",
+                "registry_verification": "PENDING",
+            },
+            "fields": {
+                "legal_name": parsed.get("legal_name"),
+                "trade_name": parsed.get("trade_name"),
+                "state": parsed.get("state"),
+                "enterprise_name": parsed.get("trade_name"),
+                "organisation_type": parsed.get("organisation_type"),
+                "registration_date": parsed.get("registration_date"),
+            },
+        }
+        if parsed.get("detected_document_type") != doc_type:
+            results[key]["status"] = "DOCUMENT_TYPE_MISMATCH" if parsed.get("detected_document_type") != "unknown" else "DOCUMENT_TYPE_UNCONFIRMED"
+            results[key]["workflow_status"]["data_extracted"] = "REVIEW_REQUIRED"
+            detected = parsed.get("detected_document_type", "unknown")
+            message = (f"Uploaded document appears to be {detected.replace('_', ' ')}; provide the requested certificate."
+                       if detected != "unknown" else "The certificate type could not be confirmed from its text. Upload a clearer document.")
+            results[key]["validation"] = {"valid": False, "reason": message}
+    return {"gstin": results["gstin"], "udyam": results["udyam"], "registry_queried": False}
+
+
+# Backward-compatible standalone KYC routes. These adapters use the current
+# extraction and validation pipeline; extraction alone never queries a registry.
+@api_router.get("/kyc/ocr-evaluation")
+def get_ocr_engine_evaluation():
+    import importlib.util
+    try:
+        from importlib.metadata import version
+    except ImportError:  # pragma: no cover - old Python compatibility
+        version = None
+
+    def package_version(name):
+        if version is None:
+            return None
+        try:
+            return version(name)
+        except Exception:
+            return None
+
+    rapid_installed = importlib.util.find_spec("rapidocr") is not None
+    paddle_installed = importlib.util.find_spec("paddleocr") is not None
+    tesseract_wrapper_installed = importlib.util.find_spec("pytesseract") is not None
+    return {
+        "primary_engine": "RapidOCR / ONNX Runtime" if rapid_installed else "Unavailable",
+        "fallback_engines": {
+            "paddleocr_package_installed": paddle_installed,
+            "tesseract_python_wrapper_installed": tesseract_wrapper_installed,
+        },
+        "versions": {
+            "rapidocr": package_version("rapidocr"),
+            "onnxruntime": package_version("onnxruntime"),
+            "paddleocr": package_version("paddleocr"),
+        },
+        "benchmark_evaluation": {
+            "gst_field_accuracy": None,
+            "udyam_field_accuracy": None,
+            "status": "NOT_MEASURED",
+            "detail": "Field accuracy requires a labelled ground-truth document set and has not been measured for this checkout.",
+        },
+        "supported_document_types": ["GST registration certificates", "Udyam registration certificates", "Address proof", "Signatory ID"],
+        "registry_queried": False,
+    }
+
+
+@api_router.post("/kyc/validate-number")
+def validate_identifier_number(number_type: str = Form(...), value: str = Form(...)):
+    number_kind = number_type.strip().lower()
+    if number_kind in {"gstin", "gst"}:
+        return kyc_service.validate_gstin_format(value)
+    if number_kind in {"udyam", "udyam_number"}:
+        return kyc_service.validate_udyam_format(value)
+    raise HTTPException(status_code=400, detail="Unsupported number_type. Allowed: 'gstin', 'udyam'.")
+
+
+@api_router.post("/kyc/extract-document")
+async def extract_kyc_document(file: UploadFile = File(...), doc_type: str = Form("generic")):
+    allowed_extensions = {".pdf", ".png", ".jpg", ".jpeg"}
+    filename = file.filename or "upload"
+    extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Allowed document formats: PDF, PNG, JPG, JPEG (maximum 10 MB).")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Document exceeds the 10 MB upload limit.")
+
+    extracted = ocr_service.extract_document_fields(filename, content, doc_type)
+    identifier = extracted.get("gstin") if doc_type == "gst_certificate" else (
+        extracted.get("udyam_number") if doc_type == "udyam_certificate" else None
+    )
+    number_validation = None
+    if identifier:
+        number_validation = (kyc_service.validate_gstin_format(identifier) if doc_type == "gst_certificate"
+                            else kyc_service.validate_udyam_format(identifier))
+        extracted["identifier_validation"] = number_validation
+
+    engine_available = extracted.get("ocr_engine") not in {None, "", "none"}
+    extraction_succeeded = bool(identifier) if doc_type in {"gst_certificate", "udyam_certificate"} else engine_available
+    validation_succeeded = number_validation.get("valid", False) if number_validation else doc_type not in {"gst_certificate", "udyam_certificate"}
+    stages = [
+        {"stage_number": 1, "stage_id": "DOCUMENT_UPLOADED", "title": "Document Uploaded", "status": "COMPLETED",
+         "detail": f"Received {filename} ({len(content) / 1024:.1f} KB).", "timestamp": "Immediate"},
+        {"stage_number": 2, "stage_id": "OCR_PROCESSING", "title": "OCR Processing",
+         "status": "COMPLETED" if engine_available else "FAILED",
+         "detail": f"OCR engine: {extracted.get('ocr_engine', 'unavailable')}.", "timestamp": "Immediate"},
+        {"stage_number": 3, "stage_id": "DATA_EXTRACTED", "title": "Data Extracted",
+         "status": "COMPLETED" if extraction_succeeded else "REVIEW_REQUIRED",
+         "detail": "Target identifier extracted." if identifier else "Target identifier was not extracted; manual entry or a clearer upload is required.",
+         "confidence": extracted.get("field_confidence", {}).get("gstin" if doc_type == "gst_certificate" else "udyam_number", 0.0),
+         "timestamp": "Immediate"},
+        {"stage_number": 4, "stage_id": "NUMBER_VALIDATION", "title": "Number Validation",
+         "status": "NOT_APPLICABLE" if not number_validation else ("PASSED" if validation_succeeded else "FAILED"),
+         "detail": number_validation.get("reason", "No registry number validation requested.") if number_validation else "No registry number for this document type.",
+         "timestamp": "Immediate"},
+        {"stage_number": 5, "stage_id": "REGISTRY_VERIFICATION_PENDING", "title": "Registry Verification Pending",
+         "status": "PENDING", "detail": "Awaiting user review and confirmation.", "timestamp": "Pending Review"},
+        {"stage_number": 6, "stage_id": "REGISTRY_VERIFICATION", "title": "Registry Verification",
+         "status": "PENDING", "detail": "No registry request was made by this extraction endpoint.", "timestamp": "Pending Submission"},
+    ]
+    return {
+        "status": "SUCCESS" if extraction_succeeded and validation_succeeded else "REVIEW_REQUIRED",
+        "filename": filename,
+        "doc_type": doc_type,
+        "extracted_fields": extracted,
+        "lifecycle_stages": stages,
+        "confidence": extracted.get("confidence", 0.0),
+        "is_corrupted_or_blank": extracted.get("is_corrupted_or_blank", False),
+        "requires_hitl_review": not extraction_succeeded or not validation_succeeded,
+        "registry_queried": False,
+    }
 
 @api_router.get("/kyc/specimen-file/{specimen_id}/{doc_type}")
 def get_specimen_file(specimen_id: str, doc_type: str):
@@ -134,150 +318,6 @@ def get_specimen_file(specimen_id: str, doc_type: str):
         headers={"Content-Disposition": f'inline; filename="{specimen_id}_{doc_type}.png"'}
     )
 
-@api_router.get("/kyc/ocr-evaluation")
-def get_ocr_engine_evaluation():
-    """
-    Evaluates PaddleOCR vs Fallback engine capabilities, preprocessing pipelines,
-    and field extraction benchmark accuracy across specimen types.
-    """
-    return ocr_service.get_ocr_engine_evaluation()
-
-@api_router.post("/kyc/validate-number")
-def validate_identifier_number(
-    number_type: str = Form(...),
-    value: str = Form(...)
-):
-    """
-    Enforces strict structural and Modulo-36 checksum validation on GSTIN and Udyam numbers.
-    Used for live validation and human-in-the-loop manual correction.
-    """
-    nt = number_type.lower().strip()
-    val = value.strip()
-    if nt in ["gstin", "gst"]:
-        return number_validator.validate_gstin(val)
-    elif nt in ["udyam", "udyam_number"]:
-        return number_validator.validate_udyam(val)
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported number_type '{number_type}'. Allowed: 'gstin', 'udyam'")
-
-@api_router.post("/kyc/extract-document")
-async def extract_kyc_document(
-    file: UploadFile = File(...),
-    doc_type: str = Form("generic")
-):
-    """
-    Performs standalone OCR extraction with image preprocessing (resizing, deskewing,
-    contrast enhancement) and returns extracted fields with confidence scores,
-    strict number validation, and granular lifecycle stages for human-in-the-loop review.
-    """
-    ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
-    MAX_FILE_SIZE = 10 * 1024 * 1024
-
-    ext = "." + file.filename.split(".")[-1].lower() if "." in file.filename else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file extension '{ext}'. Allowed: PDF, PNG, JPG, JPEG (Max 10MB)."
-        )
-
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File exceeds maximum allowed size of 10MB ({len(content)/(1024*1024):.1f}MB)."
-        )
-
-    extracted = ocr_service.extract_document_fields(
-        filename=file.filename,
-        file_bytes=content,
-        doc_type=doc_type
-    )
-
-    prep_meta = extracted.get("preprocessing_metadata", {})
-    rotation = prep_meta.get("rotation_angle_deg", 0.0)
-    is_corrupted = extracted.get("is_corrupted_or_blank", False)
-    confidence = extracted.get("confidence", 0.85)
-
-    stages = [
-        {
-            "stage_number": 1,
-            "stage_id": "DOCUMENT_UPLOADED",
-            "title": "Document Uploaded",
-            "status": "COMPLETED",
-            "detail": f"File '{file.filename}' ({len(content) / 1024:.1f} KB) received and integrity verified.",
-            "timestamp": "Immediate"
-        },
-        {
-            "stage_number": 2,
-            "stage_id": "OCR_PROCESSING",
-            "title": "OCR Preprocessing",
-            "status": "COMPLETED",
-            "detail": f"Normalized DPI, deskewed ({rotation:+.1f}°), noise-filtered, and contrast-enhanced.",
-            "timestamp": "Immediate"
-        },
-        {
-            "stage_number": 3,
-            "stage_id": "DATA_EXTRACTED",
-            "title": "Data Extracted",
-            "status": "FAILED" if is_corrupted else "COMPLETED",
-            "confidence": round(confidence, 2),
-            "detail": "Document unreadable/corrupted" if is_corrupted else f"Extracted {extracted.get('document_type')} fields ({int(confidence*100)}% confidence).",
-            "timestamp": "Immediate"
-        }
-    ]
-
-    num_val_status = "NOT_APPLICABLE"
-    num_val_detail = "Non-registry identity or utility document."
-    if extracted.get("gstin"):
-        gv = extracted.get("gstin_validation", {})
-        num_val_status = "PASSED" if gv.get("valid") else "FAILED"
-        num_val_detail = gv.get("reason", "GSTIN validation evaluated.")
-    elif extracted.get("udyam_number"):
-        uv = extracted.get("udyam_validation", {})
-        num_val_status = "PASSED" if uv.get("valid") else "FAILED"
-        num_val_detail = uv.get("reason", "Udyam validation evaluated.")
-    elif is_corrupted:
-        num_val_status = "FAILED"
-        num_val_detail = "Cannot validate identifier: document content is unreadable or blank."
-
-    stages.append({
-        "stage_number": 4,
-        "stage_id": "NUMBER_VALIDATION",
-        "title": "Number Validation",
-        "status": num_val_status,
-        "detail": num_val_detail,
-        "timestamp": "Immediate"
-    })
-
-    stages.append({
-        "stage_number": 5,
-        "stage_id": "REGISTRY_VERIFICATION_PENDING",
-        "title": "Registry Verification Pending",
-        "status": "PENDING",
-        "detail": "Awaiting user confirmation of extracted fields before querying simulated registry.",
-        "timestamp": "Pending Review"
-    })
-    stages.append({
-        "stage_number": 6,
-        "stage_id": "REGISTRY_VERIFICATION",
-        "title": "Registry Verification",
-        "status": "PENDING",
-        "detail": "Mock registry lookup not yet performed. A valid number does NOT imply active registration.",
-        "timestamp": "Pending Submission"
-    })
-
-    return {
-        "status": "SUCCESS",
-        "filename": file.filename,
-        "doc_type": doc_type,
-        "extracted_fields": extracted,
-        "lifecycle_stages": stages,
-        "confidence": round(confidence, 2),
-        "is_corrupted_or_blank": is_corrupted,
-        "requires_hitl_review": is_corrupted or (confidence < 0.80) or (num_val_status == "FAILED"),
-        "disclaimer": "Simulated mock verification for hackathon evaluation. Number validity does not imply active government status."
-    }
-
 @api_router.post("/kyc/verify-documents")
 async def verify_kyc_documents(
     business_name: str = Form(...),
@@ -286,6 +326,7 @@ async def verify_kyc_documents(
     gstin: Optional[str] = Form(None),
     udyam_number: Optional[str] = Form(None),
     consent_given: bool = Form(True),
+    identifiers_confirmed: bool = Form(False),
     purposes: Optional[str] = Form(None),
     quote_id: Optional[str] = Form("DEMO-QUOTE"),
     gst_certificate: Optional[UploadFile] = File(None),
@@ -347,6 +388,7 @@ async def verify_kyc_documents(
         gstin=gstin,
         udyam_number=udyam_number,
         consent_given=consent_given,
+        identifiers_confirmed=identifiers_confirmed,
         uploaded_files=uploaded_files_data,
         purposes=purposes_dict
     )
@@ -354,6 +396,8 @@ async def verify_kyc_documents(
 
 @api_router.post("/kyc/validate", response_model=KYCValidationResult)
 def validate_kyc(req: KYCSubmitRequest):
+    if (req.gstin or req.udyam_number) and not req.identifiers_confirmed:
+        raise HTTPException(status_code=400, detail="Review and confirm extracted or corrected identifiers before registry verification.")
     ocr_data = {}
     docs_uploaded = []
 
@@ -454,28 +498,20 @@ def validate_kyc(req: KYCSubmitRequest):
 # --- Order & Tracker Endpoints ---
 @api_router.post("/order/create", response_model=OrderResponse)
 def create_order(req: CreateOrderRequest):
-    # Fetch mock quote details
-    mock_quote = {
-        "quote_id": req.quote_id,
-        "business_name": req.business_name,
-        "monthly_recurring_inr": 2498.0,
-        "one_time_setup_inr": 0.0,
-        "items": [
-            {"product_name": "Biz Fibre 100", "quantity": 1, "total_monthly_inr": 999.0, "typical_install_days": 5},
-            {"product_name": "Business Postpaid 299", "quantity": 2, "total_monthly_inr": 598.0, "typical_install_days": 1},
-            {"product_name": "Cloud POS & Billing", "quantity": 1, "total_monthly_inr": 599.0, "typical_install_days": 3}
-        ]
-    }
+    quote = pricing_service.get_quote(req.quote_id)
+    if not quote:
+        raise HTTPException(status_code=404, detail="The selected quote was not found or has expired. Recalculate the quote before placing the order.")
     cust = {
         "business_name": req.business_name,
         "contact_name": req.contact_name,
         "contact_phone": req.contact_phone,
         "contact_email": req.contact_email,
         "installation_address": req.installation_address,
+        "installation_address_source": req.installation_address_source,
         "city": req.city,
         "pincode": req.pincode
     }
-    ord_obj = order_service.create_order(mock_quote, req.kyc_id, cust)
+    ord_obj = order_service.create_order(quote, req.kyc_id, cust)
     return ord_obj
 
 @api_router.get("/order/{order_id}", response_model=OrderResponse)
